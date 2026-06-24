@@ -89,6 +89,30 @@ p_step = c2.number_input(T("p_step"), 1, 20, 1, key="p_step")
 # Brand-specific key so each brand keeps its own floor and switching brand picks up the
 # new brand's default (a shared key would freeze the value across brand changes).
 with st.sidebar.expander("⚙️ Réglages avancés recommandation", expanded=True):
+    recommendation_mode = st.selectbox(
+        "Mode de recommandation",
+        ["Équilibre", "Gain", "Cycles"],
+        index=0,
+        help=(
+            "Équilibre = plus petite batterie qui atteint le gain demandé, en gardant les cycles en contrôle. "
+            "Gain = priorité aux économies. Cycles = priorité à l'utilisation de chaque kWh."
+        ),
+        key="recommendation_mode",
+    )
+
+    gain_threshold_pct = st.slider(
+        "Gain minimum (% du gain maximal)",
+        min_value=50,
+        max_value=100,
+        value=90,
+        step=5,
+        help=(
+            "Exemple : 90 % signifie que l'application cherche la plus petite batterie "
+            "qui récupère au moins 90 % des économies du plus gros dimensionnement testé."
+        ),
+        key="gain_threshold_pct",
+    )
+
     cycles_low = st.slider(
         "Seuil minimum de cycles/an",
         min_value=50,
@@ -96,9 +120,8 @@ with st.sidebar.expander("⚙️ Réglages avancés recommandation", expanded=Tr
         value=150,
         step=10,
         help=(
-            "Plus le seuil est bas, plus l'application acceptera une batterie "
-            "de plus grande capacité. 150 cycles/an est souvent plus réaliste "
-            "pour une batterie résidentielle."
+            "Plus le seuil est bas, plus l'application acceptera une batterie de grande capacité. "
+            "150 cycles/an est souvent plus réaliste pour du résidentiel."
         ),
         key=f"cycles_low_custom_{brand.key}",
     )
@@ -107,14 +130,19 @@ with st.sidebar.expander("⚙️ Réglages avancés recommandation", expanded=Tr
         "Seuil haut de cycles/an",
         min_value=150,
         max_value=500,
-        value=int(brand.cycles_high),
+        value=300,
         step=10,
         help="Seuil indicatif utilisé pour afficher la bande saine.",
         key=f"cycles_high_custom_{brand.key}",
     )
 
+strategy_map = {"Équilibre": "balanced", "Gain": "gain", "Cycles": "cycles"}
+recommendation_strategy = strategy_map[recommendation_mode]
+gain_threshold = gain_threshold_pct / 100.0
+
 st.sidebar.caption(
-    f"Bande saine personnalisée : {int(cycles_low)} - {int(cycles_high_custom)} cycles/an"
+    f"Bande saine personnalisée : {int(cycles_low)} - {int(cycles_high_custom)} cycles/an | "
+    f"Gain mini : {gain_threshold_pct}% | Mode : {recommendation_mode}"
 )
 st.sidebar.info(T("auto_update_hint"))
 
@@ -235,8 +263,15 @@ with st.spinner(T("spinner_sim", n=len(caps) * len(powers))):
         df.import_kWh.values, df.export_kWh.values, caps, powers,
         meta.dt_hours, roundtrip_eff, tariff_import, tariff_export, meta.coverage_days,
     )
-    rec = recommend(results, cycles_low=cycles_low, coverage_days=meta.coverage_days,
-                    brand=brand)
+    rec = recommend(
+        results,
+        gain_threshold=gain_threshold,
+        cycles_low=cycles_low,
+        cycles_high=cycles_high_custom,
+        coverage_days=meta.coverage_days,
+        brand=brand,
+        strategy=recommendation_strategy,
+    )
 
 best = rec.best
 sim = simulate(
@@ -267,6 +302,10 @@ st.caption(T(
     cap=f"{big.Cap_kWh:.0f}", power=f"{big.Power_kW:.0f}",
     gain=f"{big.Gain_CHF:,.0f}", cyc=f"{big.Cycles_per_year:.0f}",
 ))
+st.caption(
+    f"Mode actif : **{recommendation_mode}** | Seuil gain : **{gain_threshold_pct}%** "
+    f"du gain maximal | Cycles min. : **{int(cycles_low)}/an**"
+)
 
 # Surface the rationale behind the cycles floor (defined in recommend.py / PROJECT_NOTES §6):
 # why we optimize on cycles at all, and why the threshold sits where it does.
