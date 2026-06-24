@@ -267,10 +267,8 @@ with st.spinner(T("spinner_sim", n=len(caps) * len(powers))):
         results,
         gain_threshold=gain_threshold,
         cycles_low=cycles_low,
-        cycles_high=cycles_high_custom,
         coverage_days=meta.coverage_days,
         brand=brand,
-        strategy=recommendation_strategy,
     )
 
 best = rec.best
