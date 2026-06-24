@@ -132,58 +132,102 @@ def _best_per_capacity(results: pd.DataFrame) -> pd.DataFrame:
 
 def recommend(
     results: pd.DataFrame,
-    gain_threshold: float = 0.95,
+    gain_threshold: float = 0.90,
     cycles_low: float | None = None,
+    cycles_high: float | None = None,
     coverage_days: float | None = None,
     brand: BrandSpec = DEFAULT_BRAND,
+    strategy: str = "balanced",
 ) -> Recommendation:
-    """Pick a battery from a grid_search() results table. See module docstring.
+    """Pick a battery from a grid_search() results table.
 
-    `brand` sets the healthy band + oversized flag (and the sources the UI shows).
-    `cycles_low` overrides the anti-oversizing floor; if None it falls back to the
-    selected brand's healthy-band low end.
+    strategy:
+      - "cycles"   : largest value while staying above the minimum cycles/year.
+      - "gain"     : smallest battery reaching the requested % of maximum gain.
+      - "balanced" : smallest battery reaching the requested % of maximum gain;
+                     if it also satisfies the cycle floor, ideal. If not, it still
+                     avoids absurdly tiny batteries when the site has real surplus.
+
+    gain_threshold is a ratio, e.g. 0.90 = 90% of max gain.
+    cycles_low / cycles_high are user-editable from Streamlit.
     """
     warnings: list[Msg] = []
     notes: list[Msg] = []
 
     if cycles_low is None:
         cycles_low = brand.cycles_low
+    if cycles_high is None:
+        cycles_high = brand.cycles_high
+
+    strategy = (strategy or "balanced").lower().strip()
+    gain_threshold = float(gain_threshold)
+    if gain_threshold > 1.0:
+        gain_threshold = gain_threshold / 100.0
+    gain_threshold = max(0.0, min(1.0, gain_threshold))
 
     gain_max = float(results["Gain_CHF"].max())
+    gain_floor = gain_max * gain_threshold
     frontier = _best_per_capacity(results)
     max_gain_pick = results.sort_values(["Gain_CHF", "Cap_kWh", "Power_kW"],
                                         ascending=[False, True, True]).iloc[0]
 
-    # Stage 1, utilization floor (the anti-oversizing constraint).
     healthy = results[results["Cycles_per_year"] >= cycles_low]
-    if not healthy.empty:
-        # Stage 2, value: largest well-used battery = highest gain among healthy.
-        top_gain = healthy["Gain_CHF"].max()
-        # tie-break: smallest power (then smallest cap) achieving essentially that gain
-        near = healthy[healthy["Gain_CHF"] >= top_gain - 1e-9]
-        best = near.sort_values(["Power_kW", "Cap_kWh"]).iloc[0]
-        notes.append(("cycles_first", {"cycles_low": cycles_low}))
-        saved = max_gain_pick["Cap_kWh"] - best["Cap_kWh"]
-        if saved > 0:
-            notes.append(("smaller_than_max", {
-                "saved": float(saved),
-                "max_cap": float(max_gain_pick.Cap_kWh),
-                "pct": float(best.Gain_CHF / gain_max),
-            }))
-    else:
-        best = results.sort_values("Cycles_per_year", ascending=False).iloc[0]
-        warnings.append(("no_healthy", {
-            "cycles_low": cycles_low, "cyc": float(best.Cycles_per_year),
+    near_gain = results[results["Gain_CHF"] >= gain_floor] if gain_max > 0 else results.iloc[0:0]
+    both = near_gain[near_gain["Cycles_per_year"] >= cycles_low]
+
+    if strategy == "cycles":
+        if not healthy.empty:
+            top_gain = healthy["Gain_CHF"].max()
+            near = healthy[healthy["Gain_CHF"] >= top_gain - 1e-9]
+            best = near.sort_values(["Power_kW", "Cap_kWh"]).iloc[0]
+            notes.append(("cycles_first", {"cycles_low": cycles_low}))
+        else:
+            best = results.sort_values("Cycles_per_year", ascending=False).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
+
+    elif strategy == "gain":
+        if not near_gain.empty:
+            # Smallest battery that reaches the requested share of max savings.
+            best = near_gain.sort_values(["Cap_kWh", "Power_kW", "Gain_CHF"],
+                                         ascending=[True, True, False]).iloc[0]
+        else:
+            best = max_gain_pick
+
+    else:  # balanced, default
+        if not both.empty:
+            # Best practical sales recommendation: enough financial gain, still sufficiently used.
+            best = both.sort_values(["Cap_kWh", "Power_kW", "Gain_CHF"],
+                                    ascending=[True, True, False]).iloc[0]
+        elif not near_gain.empty:
+            # If no size can satisfy the cycles floor, avoid the tiny "best cycles" answer and
+            # return the smallest battery that captures the requested value.
+            best = near_gain.sort_values(["Cap_kWh", "Power_kW", "Gain_CHF"],
+                                         ascending=[True, True, False]).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
+        elif not healthy.empty:
+            top_gain = healthy["Gain_CHF"].max()
+            near = healthy[healthy["Gain_CHF"] >= top_gain - 1e-9]
+            best = near.sort_values(["Power_kW", "Cap_kWh"]).iloc[0]
+        else:
+            best = results.sort_values("Cycles_per_year", ascending=False).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
+
+    saved = float(max_gain_pick["Cap_kWh"] - best["Cap_kWh"])
+    if saved > 0 and gain_max > 0:
+        notes.append(("smaller_than_max", {
+            "saved": saved,
+            "max_cap": float(max_gain_pick.Cap_kWh),
+            "pct": float(best.Gain_CHF / gain_max),
         }))
 
-    # Health label on the chosen battery (band comes from the selected brand).
+    # Health label on the chosen battery, using the user's current Streamlit thresholds.
     cyc = float(best["Cycles_per_year"])
-    band = {"low": brand.cycles_low, "high": brand.cycles_high}
+    band = {"low": float(cycles_low), "high": float(cycles_high)}
     if cyc < brand.oversized_below:
         warnings.append(("oversized", {"cyc": cyc, **band}))
-    elif cyc < brand.cycles_low:
+    elif cyc < cycles_low:
         notes.append(("just_below", {"cyc": cyc, **band}))
-    elif cyc <= brand.cycles_high:
+    elif cyc <= cycles_high:
         notes.append(("within_band", {"cyc": cyc, **band}))
     else:
         notes.append(("above_band", {"cyc": cyc, **band}))
@@ -202,7 +246,6 @@ def recommend(
         warnings=warnings,
         notes=notes,
     )
-
 
 if __name__ == "__main__":
     from pathlib import Path
