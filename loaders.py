@@ -40,6 +40,16 @@ def _find_col(cols, *tokens) -> str | None:
     return None
 
 
+def _parse_datetime(series: pd.Series, dayfirst: bool = True) -> pd.Series:
+    """Parse timestamps robustly, including mixed CET/CEST timezone offsets."""
+    return pd.to_datetime(
+        series,
+        errors="coerce",
+        dayfirst=dayfirst,
+        utc=True,
+    ).dt.tz_convert(None)
+
+
 def _infer_dt_hours(ts: pd.Series) -> float:
     diffs = ts.sort_values().diff().dropna()
     if diffs.empty:
@@ -97,7 +107,12 @@ def detect_vendor(path: str | Path) -> str:
         if "consommation" in header and "excedent" in header:
             return "romande_energie_csv"
 
-        if "consommation" in header and "surplus" not in header and "export" not in header and "excedent" not in header:
+        if (
+            "consommation" in header
+            and "surplus" not in header
+            and "export" not in header
+            and "excedent" not in header
+        ):
             raise UnsupportedFormatError(
                 f"{path.name}: consumption-only file (no export column), not a battery candidate."
             )
@@ -120,7 +135,7 @@ def _load_huawei(path: Path) -> pd.DataFrame:
     ts_clean = df[date_col].astype(str).str.replace(
         r"\s*(DST|CEST|CET|UTC|ST)\s*$", "", regex=True
     )
-    ts = pd.to_datetime(ts_clean, errors="coerce")
+    ts = _parse_datetime(ts_clean, dayfirst=False)
 
     imp_cum = pd.to_numeric(df[imp_col], errors="coerce")
     exp_cum = pd.to_numeric(df[exp_col], errors="coerce")
@@ -144,6 +159,7 @@ def _load_huawei(path: Path) -> pd.DataFrame:
 
 def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
     head = pd.read_excel(path, header=None, nrows=15)
+
     header_row = next(
         (
             i
@@ -165,7 +181,7 @@ def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
     if not (date_col and imp_col and exp_col):
         raise UnsupportedFormatError(f"Groupe E columns not found in {path.name}")
 
-    ts = pd.to_datetime(df[date_col], errors="coerce")
+    ts = _parse_datetime(df[date_col], dayfirst=True)
     dt = _infer_dt_hours(ts.dropna())
 
     imp_kw = pd.to_numeric(df[imp_col], errors="coerce").fillna(0.0)
@@ -190,7 +206,7 @@ def _load_solaredge_csv(path: Path) -> pd.DataFrame:
     if not (date_col and imp_col and exp_col):
         raise UnsupportedFormatError(f"SolarEdge columns not found in {path.name}")
 
-    ts = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    ts = _parse_datetime(df[date_col], dayfirst=True)
 
     return pd.DataFrame(
         {
@@ -211,7 +227,7 @@ def _load_groupe_e_csv(path: Path) -> pd.DataFrame:
     if not (date_col and imp_col and exp_col):
         raise UnsupportedFormatError(f"Groupe E CSV columns not found in {path.name}")
 
-    ts = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    ts = _parse_datetime(df[date_col], dayfirst=True)
 
     return pd.DataFrame(
         {
@@ -232,7 +248,7 @@ def _load_romande_energie_csv(path: Path) -> pd.DataFrame:
     if not (date_col and imp_col and exp_col):
         raise UnsupportedFormatError(f"Romande Energie columns not found in {path.name}")
 
-    ts = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    ts = _parse_datetime(df[date_col], dayfirst=True)
 
     return pd.DataFrame(
         {
