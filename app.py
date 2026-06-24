@@ -88,12 +88,33 @@ p_step = c2.number_input(T("p_step"), 1, 20, 1, key="p_step")
 
 # Brand-specific key so each brand keeps its own floor and switching brand picks up the
 # new brand's default (a shared key would freeze the value across brand changes).
-cycles_low = st.sidebar.slider(
-    T("cycles_thresh"), 100, 400, int(brand.cycles_low), step=10,
-    help=T("cycles_thresh_help"), key=f"cycles_low_{brand.key}",
-)
+with st.sidebar.expander("⚙️ Réglages avancés recommandation", expanded=True):
+    cycles_low = st.slider(
+        "Seuil minimum de cycles/an",
+        min_value=50,
+        max_value=400,
+        value=150,
+        step=10,
+        help=(
+            "Plus le seuil est bas, plus l'application acceptera une batterie "
+            "de plus grande capacité. 150 cycles/an est souvent plus réaliste "
+            "pour une batterie résidentielle."
+        ),
+        key=f"cycles_low_custom_{brand.key}",
+    )
+
+    cycles_high_custom = st.slider(
+        "Seuil haut de cycles/an",
+        min_value=150,
+        max_value=500,
+        value=int(brand.cycles_high),
+        step=10,
+        help="Seuil indicatif utilisé pour afficher la bande saine.",
+        key=f"cycles_high_custom_{brand.key}",
+    )
+
 st.sidebar.caption(
-    T("healthy_band_caption", low=int(brand.cycles_low), high=int(brand.cycles_high))
+    f"Bande saine personnalisée : {int(cycles_low)} - {int(cycles_high_custom)} cycles/an"
 )
 st.sidebar.info(T("auto_update_hint"))
 
@@ -250,7 +271,7 @@ st.caption(T(
 # Surface the rationale behind the cycles floor (defined in recommend.py / PROJECT_NOTES §6):
 # why we optimize on cycles at all, and why the threshold sits where it does.
 with st.expander(T("why_cycles_header", low=int(cycles_low))):
-    st.markdown(T("why_cycles_body", low=int(cycles_low), high=int(brand.cycles_high)))
+    st.markdown(T("why_cycles_body", low=int(cycles_low), high=int(cycles_high_custom)))
 
 
 # --------------------------------------------------------------------------- payback charts
@@ -360,7 +381,7 @@ tab_front, tab_pay, tab_soc, tab_cyc, tab_ba = st.tabs(
 with tab_front:
     f = rec.frontier
     fig = go.Figure()
-    fig.add_hrect(y0=brand.cycles_low, y1=brand.cycles_high, line_width=0,
+    fig.add_hrect(y0=cycles_low, y1=cycles_high_custom, line_width=0,
                   fillcolor="green", opacity=0.08, yref="y2",
                   annotation_text=T("healthy_band"), annotation_position="top left")
     fig.add_trace(go.Scatter(x=f.Cap_kWh, y=f.Gain_CHF, name=T("legend_gain"),
@@ -415,7 +436,7 @@ with tab_pay:
     st.caption(T("pay_pb_caption", pb=f"{pb_cap:.0f}", rec=f"{rec_cap:.0f}"))
 
     # --- Lens 2: cycles/yr + capacity-use (why the floor is a price-free shortcut) ---
-    st.plotly_chart(_fig_cycles(f, T, cycles_low, brand.cycles_high, rec_cap), use_container_width=True)
+    st.plotly_chart(_fig_cycles(f, T, cycles_low, cycles_high_custom, rec_cap), use_container_width=True)
     st.caption(T("pay_cycles_caption", low=int(cycles_low)))
 
 ts = df.timestamp.values
@@ -487,7 +508,7 @@ def _build_pdf(sections) -> bytes:
         ax.plot(rec.frontier.Cap_kWh, rec.frontier.Gain_CHF, "b-o", label=T("legend_gain"))
         ax2 = ax.twinx()
         ax2.plot(rec.frontier.Cap_kWh, rec.frontier.Cycles_per_year, "g--s", label=T("legend_cycles"))
-        ax2.axhspan(brand.cycles_low, brand.cycles_high, color="green", alpha=0.08)
+        ax2.axhspan(cycles_low, cycles_high_custom, color="green", alpha=0.08)
         ax.axvline(best.Cap_kWh, color="k", ls=":")
         ax.set_xlabel(T("pdf_fig1_xlabel")); ax.set_ylabel(T("pdf_fig1_ylabel"))
         ax2.set_ylabel(T("pdf_fig1_y2label"))
@@ -573,9 +594,9 @@ def _build_pdf(sections) -> bytes:
         fig6, axq = plt.subplots(figsize=(9, 3.0))
         l1, = axq.plot(fp.Cap_kWh, fp.Cycles_per_year, "-o", color="#0891b2", lw=2, ms=4,
                        label=T("pay_cycles_use"))
-        axq.axhspan(cycles_low, brand.cycles_high, color="#86efac", alpha=0.25)
-        axq.text(fp.Cap_kWh.iloc[0], (cycles_low + brand.cycles_high) / 2,
-                 _tx(T("pay_cycles_healthy", low=int(cycles_low), high=int(brand.cycles_high))),
+        axq.axhspan(cycles_low, cycles_high_custom, color="#86efac", alpha=0.25)
+        axq.text(fp.Cap_kWh.iloc[0], (cycles_low + cycles_high_custom) / 2,
+                 _tx(T("pay_cycles_healthy", low=int(cycles_low), high=int(cycles_high_custom))),
                  fontsize=6, color="#15803d", va="center")
         axq.axhline(150, color="#dc2626", ls="--", lw=1)
         axq.text(fp.Cap_kWh.iloc[-1], 150, _tx(T("pay_cycles_oversized")),
@@ -607,7 +628,7 @@ def _build_pdf(sections) -> bytes:
         (T("pdf_savings"), T("pdf_savings_val", v=f"{best.Gain_CHF:,.0f}")),
         (T("pdf_brand"), brand.name),
         (T("pdf_cycles"), T("pdf_cycles_val", cyc=f"{best.Cycles_per_year:.0f}",
-                            low=int(brand.cycles_low), high=int(brand.cycles_high))),
+                            low=int(cycles_low), high=int(cycles_high_custom))),
         (T("pdf_import_avoided"), T("pdf_energy_val", kwh=f"{sim.import_avoided:,.0f}",
                                     pct=f"{sim.import_reduction:.0%}")),
         (T("pdf_surplus"), T("pdf_energy_val", kwh=f"{sim.export_stored:,.0f}",
