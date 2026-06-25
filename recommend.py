@@ -1,371 +1,240 @@
-# recommend.py
-# Dimensionnement batterie PV avec calcul correct des cycles équivalents (EFC)
-# Méthode retenue :
-# EFC = énergie réellement déchargée par la batterie / capacité utile
-# capacité utile = capacité nominale x (1 - SOC_min)
+"""Cycles-aware battery recommendation.
+
+The client's complaint: the old "biggest gain" pick is often OVERSIZED. The gain-vs-capacity
+curve is concave, so a fixed "95% of max gain" floor always lands on a big, under-cycled
+battery. Fix: make CYCLES the primary constraint (anti-oversizing), then maximize value
+within it.
+
+Logic:
+  Stage 1 (utilization floor): keep candidates with cycles/year >= cycles_low (healthy use).
+  Stage 2 (value):             among those, pick the highest-gain one, i.e. the LARGEST
+                               battery that is still well used. Tie-break to the smallest
+                               power. Falls back to the highest-cycle candidate (and warns)
+                               if surplus is too low for anything to reach the floor.
+
+Healthy band from research (PROJECT_NOTES.md §6): ~250-300 cycles/yr. The target is
+anchored on the *installed battery brand's* own warranty (see BRANDS below): the GoodWe
+Lynx D (GW8.3-BAT, the installer's actual hardware and the default) is calendar-limited,
+not cycle-limited, its ~10,000-cycle cell life dwarfs any realistic solar cycling, while
+Huawei LUNA2000 (which here is only the meter / data source) is designed around ~263/yr.
+The selected brand sets the healthy band, the oversized flag, and the warranty sources
+shown in the UI; below ~150/yr is flagged oversized regardless.
+`gain_threshold` is kept only to report the old "smallest within X% of max gain" pick for
+comparison, it no longer drives the recommendation.
+
+`warnings` and `notes` are language-neutral: each is a (code, params) tuple. The UI layer
+(see i18n.MSG / i18n.msg) renders them in the chosen language, so this module stays free of
+display text.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from dataclasses import dataclass, field
 
-import numpy as np
 import pandas as pd
+
+Msg = tuple[str, dict]
+
+CYCLES_HEALTHY_LOW = 250.0
+CYCLES_HEALTHY_HIGH = 300.0
+CYCLES_OVERSIZED_BELOW = 150.0
+
+
+@dataclass(frozen=True)
+class BrandSpec:
+    key: str
+    name: str
+    cycles_low: float
+    cycles_high: float
+    oversized_below: float
+    design_cycles_yr: float
+    sources: tuple[tuple[str, str], ...]
+
+
+GOODWE = BrandSpec(
+    key="goodwe",
+    name="GoodWe Lynx D (GW8.3-BAT)",
+    cycles_low=250.0,
+    cycles_high=350.0,
+    oversized_below=150.0,
+    design_cycles_yr=1000.0,
+    sources=(
+        ("GoodWe Lynx D Series (HV), product page", "https://en.goodwe.com/lynxd"),
+        ("GoodWe battery compatibility overview (GW8.3-BAT-D module), PDF", "https://en.goodwe.com/Ftp/EN/Downloads/User%20Manual/GW_Battery%20Compatibility%20Overview-EN.pdf"),
+        ("GW8.3-BAT-D-G20 spec & ~10,000-cycle life (reseller listing)", "https://www.solarproof.com.au/products/GW83-BAT-D-G20/"),
+        ("GoodWe battery review, Solar Choice (independent)", "https://www.solarchoice.net.au/products/batteries/goodwe-review/"),
+    ),
+)
+
+HUAWEI = BrandSpec(
+    key="huawei",
+    name="Huawei (LUNA2000)",
+    cycles_low=250.0,
+    cycles_high=300.0,
+    oversized_below=150.0,
+    design_cycles_yr=263.0,
+    sources=(
+        ("Huawei LUNA2000-7/14/21-S1, spec & warranty", "https://solar.huawei.com/en/products/LUNA2000-7-14-21-S1/specs/"),
+        ("Huawei FusionSolar EU warranty conditions, SKE Solar", "https://ske-solar.com/en/support/warranty/huawei-fusionsolar-warranty-conditions/"),
+        ("LUNA2000 battery system specifications, Huawei support", "https://support.huawei.com/enterprise/en/doc/EDOC1100186676/661b0e12/luna2000-battery-system-specifications"),
+    ),
+)
+
+BRANDS: dict[str, BrandSpec] = {GOODWE.key: GOODWE, HUAWEI.key: HUAWEI}
+DEFAULT_BRAND = GOODWE
 
 
 @dataclass
-class BatterySimulationResult:
-    capacity_kwh: float
-    power_kw: float
-    gain_chf: float
-    import_before_kwh: float
-    import_after_kwh: float
-    export_before_kwh: float
-    export_after_kwh: float
-    import_avoided_kwh: float
-    export_avoided_kwh: float
-    energy_charged_kwh: float
-    energy_discharged_kwh: float
-    usable_capacity_kwh: float
-    cycles_efc_per_year: float
-    cycles_per_day: float
-    usage_ratio_per_day: float
-    soc_min_real_pct: float
-    soc_max_real_pct: float
-    soc_series_pct: pd.Series
-    monthly: pd.DataFrame
+class Recommendation:
+    best: pd.Series
+    frontier: pd.DataFrame
+    max_gain_pick: pd.Series
+    gain_max: float
+    warnings: list[Msg] = field(default_factory=list)
+    notes: list[Msg] = field(default_factory=list)
 
 
-def _as_series(values, index=None, name: str = "") -> pd.Series:
-    if isinstance(values, pd.Series):
-        s = values.copy()
-        if name:
-            s.name = name
-        return s
-    return pd.Series(values, index=index, name=name)
+def _best_per_capacity(results: pd.DataFrame) -> pd.DataFrame:
+    idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
+    return results.loc[idx].sort_values("Cap_kWh").reset_index(drop=True)
 
 
-def _prepare_profiles(
-    import_kw_or_kwh,
-    export_kw_or_kwh,
-    dt_hours: float,
-    unit: str = "kW",
-) -> tuple[pd.Series, pd.Series]:
-    """
-    Retourne import/export en kWh par pas de temps.
+def recommend(
+    results: pd.DataFrame,
+    gain_threshold: float = 0.90,
+    cycles_low: float | None = None,
+    cycles_high: float | None = None,
+    coverage_days: float | None = None,
+    brand: BrandSpec = DEFAULT_BRAND,
+    strategy: str = "balanced",
+) -> Recommendation:
+    warnings: list[Msg] = []
+    notes: list[Msg] = []
 
-    unit="kW"  : les valeurs sont des puissances moyennes, conversion kW x dt
-    unit="kWh" : les valeurs sont déjà des énergies par pas
-    """
-    imp = _as_series(import_kw_or_kwh, name="import")
-    exp = _as_series(export_kw_or_kwh, index=imp.index, name="export")
+    if cycles_low is None:
+        cycles_low = brand.cycles_low
+    if cycles_high is None:
+        cycles_high = brand.cycles_high
 
-    imp = pd.to_numeric(imp, errors="coerce").fillna(0).clip(lower=0)
-    exp = pd.to_numeric(exp, errors="coerce").fillna(0).clip(lower=0)
+    strategy = (strategy or "balanced").lower().strip()
+    gain_threshold = float(gain_threshold)
+    if gain_threshold > 1.0:
+        gain_threshold = gain_threshold / 100.0
+    gain_threshold = max(0.0, min(1.0, gain_threshold))
 
-    if unit.lower() == "kw":
-        imp = imp * dt_hours
-        exp = exp * dt_hours
-    elif unit.lower() == "kwh":
-        pass
+    gain_max = float(results["Gain_CHF"].max())
+    gain_floor = gain_max * gain_threshold
+    frontier = _best_per_capacity(results)
+    max_gain_pick = results.sort_values(
+        ["Gain_CHF", "Cap_kWh", "Power_kW"],
+        ascending=[False, True, True],
+    ).iloc[0]
+
+    healthy = results[results["Cycles_per_year"] >= cycles_low]
+    near_gain = results[results["Gain_CHF"] >= gain_floor] if gain_max > 0 else results.iloc[0:0]
+    both = near_gain[near_gain["Cycles_per_year"] >= cycles_low]
+
+    if strategy == "cycles":
+        if not healthy.empty:
+            top_gain = healthy["Gain_CHF"].max()
+            near = healthy[healthy["Gain_CHF"] >= top_gain - 1e-9]
+            best = near.sort_values(["Power_kW", "Cap_kWh"]).iloc[0]
+            notes.append(("cycles_first", {"cycles_low": cycles_low}))
+        else:
+            best = results.sort_values("Cycles_per_year", ascending=False).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
+
+    elif strategy == "gain":
+        if not near_gain.empty:
+            best = near_gain.sort_values(
+                ["Cap_kWh", "Power_kW", "Gain_CHF"],
+                ascending=[True, True, False],
+            ).iloc[0]
+        else:
+            best = max_gain_pick
+
     else:
-        raise ValueError("unit doit être 'kW' ou 'kWh'.")
+        if not both.empty:
+            best = both.sort_values(
+                ["Cap_kWh", "Power_kW", "Gain_CHF"],
+                ascending=[True, True, False],
+            ).iloc[0]
+        elif not near_gain.empty:
+            best = near_gain.sort_values(
+                ["Cap_kWh", "Power_kW", "Gain_CHF"],
+                ascending=[True, True, False],
+            ).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
+        elif not healthy.empty:
+            top_gain = healthy["Gain_CHF"].max()
+            near = healthy[healthy["Gain_CHF"] >= top_gain - 1e-9]
+            best = near.sort_values(["Power_kW", "Cap_kWh"]).iloc[0]
+        else:
+            best = results.sort_values("Cycles_per_year", ascending=False).iloc[0]
+            warnings.append(("no_healthy", {"cycles_low": cycles_low, "cyc": float(best.Cycles_per_year)}))
 
-    return imp, exp
+    saved = float(max_gain_pick["Cap_kWh"] - best["Cap_kWh"])
+    if saved > 0 and gain_max > 0:
+        notes.append(("smaller_than_max", {
+            "saved": saved,
+            "max_cap": float(max_gain_pick.Cap_kWh),
+            "pct": float(best.Gain_CHF / gain_max),
+        }))
 
-
-def _is_high_tariff(ts, hp_ranges=((7, 12), (17, 23)), weekend_full_low_tariff=False) -> bool:
-    if weekend_full_low_tariff and ts.weekday() >= 5:
-        return False
-
-    hour = ts.hour + ts.minute / 60
-    for start, end in hp_ranges:
-        if start <= hour < end:
-            return True
-    return False
-
-
-def _tariff_series(index, hp_price: float, hc_price: float, hp_ranges, weekend_full_low_tariff: bool):
-    if isinstance(index, pd.DatetimeIndex):
-        return pd.Series(
-            [
-                hp_price if _is_high_tariff(ts, hp_ranges, weekend_full_low_tariff) else hc_price
-                for ts in index
-            ],
-            index=index,
-            name="tarif_import",
-        )
-    return pd.Series(hp_price, index=index, name="tarif_import")
-
-
-def simulate_battery(
-    import_kw_or_kwh,
-    export_kw_or_kwh,
-    capacity_kwh: float,
-    power_kw: float,
-    dt_hours: float = 0.25,
-    unit: str = "kW",
-    roundtrip_efficiency: float = 0.95,
-    soc_min_pct: float = 5.0,
-    tariff_import_hp: float = 0.32,
-    tariff_import_hc: float = 0.21,
-    tariff_export: float = 0.08,
-    hp_ranges=((7, 12), (17, 23)),
-    weekend_full_low_tariff: bool = False,
-) -> BatterySimulationResult:
-    """
-    Simulation autoconsommation batterie.
-
-    Priorité :
-    - charge sur surplus PV/export
-    - décharge pour couvrir l'import réseau
-    - pas de charge réseau artificielle
-    """
-
-    if capacity_kwh <= 0:
-        raise ValueError("capacity_kwh doit être > 0.")
-    if power_kw <= 0:
-        raise ValueError("power_kw doit être > 0.")
-
-    imp, exp = _prepare_profiles(import_kw_or_kwh, export_kw_or_kwh, dt_hours, unit)
-    index = imp.index
-
-    eta = float(roundtrip_efficiency)
-    if not 0 < eta <= 1:
-        raise ValueError("roundtrip_efficiency doit être entre 0 et 1.")
-
-    # Répartition simple des pertes : rendement côté charge et côté décharge.
-    eta_charge = np.sqrt(eta)
-    eta_discharge = np.sqrt(eta)
-
-    usable_capacity_kwh = capacity_kwh * (1 - soc_min_pct / 100)
-    soc_kwh = 0.0  # énergie utilisable au-dessus du SOC min
-
-    max_power_energy = power_kw * dt_hours
-
-    import_after = []
-    export_after = []
-    soc_values = []
-    charged_from_pv = []
-    discharged_to_load = []
-
-    for imp_kwh, exp_kwh in zip(imp.to_numpy(), exp.to_numpy()):
-        # 1) charge avec surplus exportable
-        charge_input_kwh = min(exp_kwh, max_power_energy, (usable_capacity_kwh - soc_kwh) / eta_charge)
-        stored_kwh = charge_input_kwh * eta_charge
-        soc_kwh += stored_kwh
-        exp_remaining = exp_kwh - charge_input_kwh
-
-        # 2) décharge pour éviter import
-        discharge_output_kwh = min(imp_kwh, max_power_energy, soc_kwh * eta_discharge)
-        removed_from_battery_kwh = discharge_output_kwh / eta_discharge
-        soc_kwh -= removed_from_battery_kwh
-        imp_remaining = imp_kwh - discharge_output_kwh
-
-        import_after.append(imp_remaining)
-        export_after.append(exp_remaining)
-        charged_from_pv.append(charge_input_kwh)
-        discharged_to_load.append(discharge_output_kwh)
-
-        soc_pct = soc_min_pct + (soc_kwh / usable_capacity_kwh * (100 - soc_min_pct) if usable_capacity_kwh > 0 else 0)
-        soc_values.append(soc_pct)
-
-    import_after = pd.Series(import_after, index=index, name="import_after_kwh")
-    export_after = pd.Series(export_after, index=index, name="export_after_kwh")
-    charged_from_pv = pd.Series(charged_from_pv, index=index, name="energy_charged_kwh")
-    discharged_to_load = pd.Series(discharged_to_load, index=index, name="energy_discharged_kwh")
-    soc_series_pct = pd.Series(soc_values, index=index, name="soc_pct")
-
-    import_price = _tariff_series(index, tariff_import_hp, tariff_import_hc, hp_ranges, weekend_full_low_tariff)
-
-    cost_before = (imp * import_price).sum() - (exp * tariff_export).sum()
-    cost_after = (import_after * import_price).sum() - (export_after * tariff_export).sum()
-    gain_chf = float(cost_before - cost_after)
-
-    import_before_kwh = float(imp.sum())
-    import_after_kwh = float(import_after.sum())
-    export_before_kwh = float(exp.sum())
-    export_after_kwh = float(export_after.sum())
-
-    import_avoided_kwh = import_before_kwh - import_after_kwh
-    export_avoided_kwh = export_before_kwh - export_after_kwh
-
-    energy_charged_kwh = float(charged_from_pv.sum())
-    energy_discharged_kwh = float(discharged_to_load.sum())
-
-    # Méthode correcte : cycles complets équivalents, basés sur l'énergie réellement déchargée
-    cycles_efc = energy_discharged_kwh / usable_capacity_kwh if usable_capacity_kwh > 0 else 0
-
-    if isinstance(index, pd.DatetimeIndex) and len(index) > 0:
-        days = max((index.max() - index.min()).total_seconds() / 86400, 1)
+    cyc = float(best["Cycles_per_year"])
+    band = {"low": float(cycles_low), "high": float(cycles_high)}
+    if cyc < brand.oversized_below:
+        warnings.append(("oversized", {"cyc": cyc, **band}))
+    elif cyc < cycles_low:
+        notes.append(("just_below", {"cyc": cyc, **band}))
+    elif cyc <= cycles_high:
+        notes.append(("within_band", {"cyc": cyc, **band}))
     else:
-        days = max(len(imp) * dt_hours / 24, 1)
+        notes.append(("above_band", {"cyc": cyc, **band}))
 
-    cycles_per_day = cycles_efc / days
-    usage_ratio_per_day = cycles_per_day  # 1.0 = une capacité utile complète utilisée par jour
+    if gain_max <= 0:
+        warnings.append(("no_savings", {}))
 
-    monthly = pd.DataFrame(
-        {
-            "import_avant_kwh": imp,
-            "import_apres_kwh": import_after,
-            "export_avant_kwh": exp,
-            "export_apres_kwh": export_after,
-            "charge_batterie_kwh": charged_from_pv,
-            "decharge_batterie_kwh": discharged_to_load,
-        }
-    )
+    if coverage_days is not None and coverage_days < 360:
+        warnings.append(("partial_year", {"days": float(coverage_days)}))
 
-    if isinstance(monthly.index, pd.DatetimeIndex):
-        monthly = monthly.resample("ME").sum()
-        monthly.index = monthly.index.strftime("%Y-%m")
-    else:
-        monthly = pd.DataFrame(monthly.sum()).T
-
-    return BatterySimulationResult(
-        capacity_kwh=float(capacity_kwh),
-        power_kw=float(power_kw),
-        gain_chf=gain_chf,
-        import_before_kwh=import_before_kwh,
-        import_after_kwh=import_after_kwh,
-        export_before_kwh=export_before_kwh,
-        export_after_kwh=export_after_kwh,
-        import_avoided_kwh=float(import_avoided_kwh),
-        export_avoided_kwh=float(export_avoided_kwh),
-        energy_charged_kwh=energy_charged_kwh,
-        energy_discharged_kwh=energy_discharged_kwh,
-        usable_capacity_kwh=float(usable_capacity_kwh),
-        cycles_efc_per_year=float(cycles_efc),
-        cycles_per_day=float(cycles_per_day),
-        usage_ratio_per_day=float(usage_ratio_per_day),
-        soc_min_real_pct=float(soc_series_pct.min()) if len(soc_series_pct) else soc_min_pct,
-        soc_max_real_pct=float(soc_series_pct.max()) if len(soc_series_pct) else soc_min_pct,
-        soc_series_pct=soc_series_pct,
-        monthly=monthly,
+    return Recommendation(
+        best=best,
+        frontier=frontier,
+        max_gain_pick=max_gain_pick,
+        gain_max=gain_max,
+        warnings=warnings,
+        notes=notes,
     )
 
 
-def optimize_battery(
-    import_kw_or_kwh,
-    export_kw_or_kwh,
-    capacities_kwh: Iterable[float],
-    powers_kw: Iterable[float],
-    dt_hours: float = 0.25,
-    unit: str = "kW",
-    roundtrip_efficiency: float = 0.95,
-    soc_min_pct: float = 5.0,
-    tariff_import_hp: float = 0.32,
-    tariff_import_hc: float = 0.21,
-    tariff_export: float = 0.08,
-    hp_ranges=((7, 12), (17, 23)),
-    weekend_full_low_tariff: bool = False,
-    min_healthy_cycles: float = 150,
-    max_healthy_cycles: float = 350,
-    gain_threshold_pct: float = 86,
-) -> tuple[BatterySimulationResult, BatterySimulationResult, pd.DataFrame]:
-    """
-    Retourne :
-    - recommandation principale
-    - variante gain maximum
-    - tableau de toutes les simulations
+if __name__ == "__main__":
+    from pathlib import Path
+    from loaders import load_meter_file
+    from simulation import grid_search
+    from i18n import msg
 
-    Logique recommandée :
-    1) calculer toutes les combinaisons capacité/puissance
-    2) identifier le gain maximum
-    3) retenir la plus petite capacité qui atteint gain_threshold_pct du gain max,
-       puis la puissance la plus faible suffisante pour ce gain.
-    4) les cycles EFC sont informatifs et servent à alerter le surdimensionnement.
-    """
-
-    results: list[BatterySimulationResult] = []
-
-    for cap in capacities_kwh:
-        for pwr in powers_kw:
-            results.append(
-                simulate_battery(
-                    import_kw_or_kwh=import_kw_or_kwh,
-                    export_kw_or_kwh=export_kw_or_kwh,
-                    capacity_kwh=float(cap),
-                    power_kw=float(pwr),
-                    dt_hours=dt_hours,
-                    unit=unit,
-                    roundtrip_efficiency=roundtrip_efficiency,
-                    soc_min_pct=soc_min_pct,
-                    tariff_import_hp=tariff_import_hp,
-                    tariff_import_hc=tariff_import_hc,
-                    tariff_export=tariff_export,
-                    hp_ranges=hp_ranges,
-                    weekend_full_low_tariff=weekend_full_low_tariff,
-                )
-            )
-
-    rows = []
-    for r in results:
-        rows.append(
-            {
-                "capacity_kwh": r.capacity_kwh,
-                "power_kw": r.power_kw,
-                "gain_chf": r.gain_chf,
-                "cycles_efc_per_year": r.cycles_efc_per_year,
-                "cycles_per_day": r.cycles_per_day,
-                "usage_ratio_per_day": r.usage_ratio_per_day,
-                "import_avoided_kwh": r.import_avoided_kwh,
-                "export_avoided_kwh": r.export_avoided_kwh,
-                "energy_charged_kwh": r.energy_charged_kwh,
-                "energy_discharged_kwh": r.energy_discharged_kwh,
-                "usable_capacity_kwh": r.usable_capacity_kwh,
-                "soc_max_real_pct": r.soc_max_real_pct,
-            }
-        )
-
-    table = pd.DataFrame(rows).sort_values(["capacity_kwh", "power_kw"]).reset_index(drop=True)
-
-    idx_gain_max = table["gain_chf"].idxmax()
-    gain_max_row = table.loc[idx_gain_max]
-    gain_max = gain_max_row["gain_chf"]
-
-    eligible = table[table["gain_chf"] >= gain_max * gain_threshold_pct / 100].copy()
-
-    # Recommandation : atteindre l'essentiel du gain avec le moins de capacité possible,
-    # puis la puissance la plus basse dans cette capacité.
-    eligible = eligible.sort_values(["capacity_kwh", "power_kw", "gain_chf"], ascending=[True, True, False])
-    rec_row = eligible.iloc[0]
-
-    def find_result(row) -> BatterySimulationResult:
-        for r in results:
-            if r.capacity_kwh == float(row["capacity_kwh"]) and r.power_kw == float(row["power_kw"]):
-                return r
-        raise RuntimeError("Résultat introuvable.")
-
-    recommended = find_result(rec_row)
-    max_gain_result = find_result(gain_max_row)
-
-    table["status_cycles"] = np.select(
-        [
-            table["cycles_efc_per_year"] < min_healthy_cycles,
-            table["cycles_efc_per_year"] > max_healthy_cycles,
-        ],
-        [
-            "surdimensionnée / peu cyclée",
-            "fortement sollicitée",
-        ],
-        default="zone saine",
+    script_dir = Path(__file__).resolve().parent
+    sample = next(
+        (p for p in [
+            script_dir / "data" / "battery_data" / "Groupe E - Ross Nicolas - Mesures 01.01.25 - 31.12.25.xlsx",
+            Path("data/battery_data/Groupe E - Ross Nicolas - Mesures 01.01.25 - 31.12.25.xlsx"),
+        ] if p.is_file()),
+        None,
     )
-
-    return recommended, max_gain_result, table
-
-
-def build_cycle_comment(cycles: float, min_healthy: float = 150, max_healthy: float = 350) -> str:
-    if cycles < min_healthy:
-        return (
-            f"Seulement {cycles:.0f} cycles équivalents/an : batterie peu sollicitée. "
-            "Cela indique une capacité probablement trop élevée par rapport au surplus réellement disponible."
-        )
-    if cycles > max_healthy:
-        return (
-            f"{cycles:.0f} cycles équivalents/an : batterie fortement sollicitée. "
-            "Le dimensionnement est énergétiquement actif, mais l'usure sera plus rapide."
-        )
-    return (
-        f"{cycles:.0f} cycles équivalents/an : utilisation cohérente. "
-        "La batterie est suffisamment utilisée sans être excessivement sollicitée."
+    if sample is None:
+        raise SystemExit("Sample file not found.")
+    df, meta = load_meter_file(sample)
+    gs = grid_search(
+        df.import_kWh.values, df.export_kWh.values,
+        caps=range(5, 21), powers=range(3, 11), dt_hours=meta.dt_hours,
+        roundtrip_eff=0.92, tariff_import=0.32, tariff_export=0.08,
+        coverage_days=meta.coverage_days,
     )
+    rec = recommend(gs, coverage_days=meta.coverage_days)
+    b, big = rec.best, rec.max_gain_pick
+    print(f"Gain max in range: {rec.gain_max:.0f} CHF/yr")
+    print(f"RECOMMENDED: {b.Cap_kWh:.0f} kWh / {b.Power_kW:.0f} kW -> {b.Gain_CHF:.0f} CHF/yr, {b.Cycles_per_year:.0f} cycles/yr")
+    print(f"old max-gain pick: {big.Cap_kWh:.0f} kWh / {big.Power_kW:.0f} kW -> {big.Gain_CHF:.0f} CHF/yr, {big.Cycles_per_year:.0f} cycles/yr")
+    print("\nNotes:", *(msg("en", c, p) for c, p in rec.notes), sep="\n  ")
+    print("Warnings:", *([msg("en", c, p) for c, p in rec.warnings] or ["(none)"]), sep="\n  ")
