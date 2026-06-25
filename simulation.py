@@ -10,8 +10,9 @@ Efficiency convention (consistent, not double-counted):
   eta = sqrt(roundtrip_eff). Charging stores `charge*eta` in the cells; delivering
   `discharge` to the load draws `discharge/eta` from the cells. Round trip = eta*eta.
 
-Cycle definition (PINNED, do not change without updating PROJECT_NOTES.md §6/§11):
-  equivalent_full_cycles = (total energy discharged to load) / (nameplate capacity).
+Cycle definition:
+  equivalent_full_cycles = (total energy discharged to load) / (usable capacity).
+  usable capacity = nameplate capacity x (1 - SOC_min).
   Annualized to /year using the data's coverage (with a warning if < ~360 days).
 """
 
@@ -93,6 +94,10 @@ class SimResult:
     export_stored: float       # = energy taken from surplus to charge
     gain_chf: float            # annual financial benefit
     cycles_per_year: float
+    usable_capacity_kWh: float
+    soc_min_pct: float
+    charge_total_kWh: float
+    discharge_total_kWh: float
     surplus_captured: float    # fraction of solar surplus the battery soaks up (0..1)
     import_reduction: float    # fraction of grid import avoided (0..1)
 
@@ -115,6 +120,7 @@ def simulate(
     tariff_import: float,
     tariff_export: float,
     coverage_days: float | None = None,
+    soc_min_pct: float = 5.0,
 ) -> SimResult:
     """Run one battery simulation and return energy + financial + cycle metrics."""
     imp = np.ascontiguousarray(import_kWh, dtype=np.float64)
@@ -122,8 +128,11 @@ def simulate(
     eta = float(np.sqrt(roundtrip_eff))
     power_per_step = power_kW * dt_hours
 
+    usable_capacity_kWh = float(capacity_kWh) * (1.0 - float(soc_min_pct) / 100.0)
+    usable_capacity_kWh = max(usable_capacity_kWh, 0.0)
+
     imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch(
-        imp, exp, float(capacity_kWh), power_per_step, eta
+        imp, exp, usable_capacity_kWh, power_per_step, eta
     )
 
     import_before = float(imp.sum())
@@ -134,7 +143,7 @@ def simulate(
 
     # Annualize cycles to /year from however much data we have.
     days = coverage_days if coverage_days and coverage_days > 0 else len(imp) * dt_hours / 24.0
-    cycles_total = discharge_tot / capacity_kWh if capacity_kWh > 0 else 0.0
+    cycles_total = discharge_tot / usable_capacity_kWh if usable_capacity_kWh > 0 else 0.0
     cycles_per_year = cycles_total * 365.0 / days if days > 0 else 0.0
 
     # Honest, meter-computable shares (we only see surplus/export, not total PV).
@@ -153,6 +162,10 @@ def simulate(
         export_stored=export_stored,
         gain_chf=float(gain),
         cycles_per_year=float(cycles_per_year),
+        usable_capacity_kWh=float(usable_capacity_kWh),
+        soc_min_pct=float(soc_min_pct),
+        charge_total_kWh=float(charge_tot),
+        discharge_total_kWh=float(discharge_tot),
         surplus_captured=float(surplus_captured),
         import_reduction=float(import_reduction),
     )
@@ -168,6 +181,7 @@ def grid_search(
     tariff_import: float,
     tariff_export: float,
     coverage_days: float | None = None,
+    soc_min_pct: float = 5.0,
 ) -> pd.DataFrame:
     """Simulate every (capacity, power) pair. Returns a tidy results table."""
     imp = np.ascontiguousarray(import_kWh, dtype=np.float64)
@@ -178,9 +192,12 @@ def grid_search(
     rows = []
     for cap in caps:
         for p in powers:
-            _, _, _, charge_tot, discharge_tot = _dispatch(imp, exp, float(cap), p * dt_hours, eta)
+            usable_cap = float(cap) * (1.0 - float(soc_min_pct) / 100.0)
+            usable_cap = max(usable_cap, 0.0)
+
+            _, _, _, charge_tot, discharge_tot = _dispatch(imp, exp, usable_cap, p * dt_hours, eta)
             gain = discharge_tot * tariff_import - charge_tot * tariff_export
-            cycles_year = (discharge_tot / cap * 365.0 / days) if (cap > 0 and days > 0) else 0.0
+            cycles_year = (discharge_tot / usable_cap * 365.0 / days) if (usable_cap > 0 and days > 0) else 0.0
             rows.append(
                 {
                     "Cap_kWh": float(cap),
@@ -189,6 +206,8 @@ def grid_search(
                     "Cycles_per_year": float(cycles_year),
                     "Import_avoided_kWh": float(discharge_tot),
                     "Export_stored_kWh": float(charge_tot),
+                    "Usable_capacity_kWh": float(usable_cap),
+                    "SOC_min_pct": float(soc_min_pct),
                 }
             )
     return pd.DataFrame(rows)
