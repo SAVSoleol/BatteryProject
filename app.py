@@ -61,10 +61,57 @@ with st.sidebar.expander(T("brand_sources_header")):
     for label, url in brand.sources:
         st.markdown(f"- [{label}]({url})")
 
-tariff_import = st.sidebar.number_input(T("tariff_import"), value=0.32, step=0.01,
-                                        format="%.2f", key="tariff_import")
-tariff_export = st.sidebar.number_input(T("tariff_export"), value=0.08, step=0.01,
-                                        format="%.2f", key="tariff_export")
+st.sidebar.markdown("**Tarifs énergie**")
+tariff_import_ht = st.sidebar.number_input(
+    "Tarif achat haut tarif (CHF/kWh)",
+    value=0.32,
+    step=0.01,
+    format="%.2f",
+    key="tariff_import_ht",
+)
+tariff_import_bt = st.sidebar.number_input(
+    "Tarif achat bas tarif (CHF/kWh)",
+    value=0.21,
+    step=0.01,
+    format="%.2f",
+    key="tariff_import_bt",
+)
+tariff_export = st.sidebar.number_input(
+    T("tariff_export"),
+    value=0.08,
+    step=0.01,
+    format="%.2f",
+    key="tariff_export",
+)
+
+with st.sidebar.expander("Plages haut tarif", expanded=False):
+    ht_start = st.number_input(
+        "Début haut tarif",
+        min_value=0.0,
+        max_value=24.0,
+        value=7.0,
+        step=0.5,
+        format="%.1f",
+        key="ht_start",
+    )
+    ht_end = st.number_input(
+        "Fin haut tarif",
+        min_value=0.0,
+        max_value=24.0,
+        value=22.0,
+        step=0.5,
+        format="%.1f",
+        key="ht_end",
+    )
+    weekend_low_tariff = st.checkbox(
+        "Week-end en bas tarif",
+        value=False,
+        key="weekend_low_tariff",
+    )
+
+tariff_import = tariff_import_ht  # compatibilité avec les anciens textes/graphes
+high_tariff_periods = ((float(ht_start), float(ht_end)),)
+
 roundtrip_eff = st.sidebar.slider(T("roundtrip"), 0.50, 1.0, 0.92, key="roundtrip")
 
 # Battery cost assumptions, drive the "Payback" tab only (not the recommendation, which is
@@ -211,16 +258,40 @@ if not caps or not powers:
 
 with st.spinner(T("spinner_sim", n=len(caps) * len(powers))):
     results = grid_search(
-        df.import_kWh.values, df.export_kWh.values, caps, powers,
-        meta.dt_hours, roundtrip_eff, tariff_import, tariff_export, meta.coverage_days,
+        df.import_kWh.values,
+        df.export_kWh.values,
+        caps,
+        powers,
+        meta.dt_hours,
+        roundtrip_eff,
+        tariff_import,
+        tariff_export,
+        meta.coverage_days,
+        timestamps=df.timestamp.values,
+        tariff_import_ht=tariff_import_ht,
+        tariff_import_bt=tariff_import_bt,
+        high_tariff_periods=high_tariff_periods,
+        weekend_low_tariff=weekend_low_tariff,
     )
     rec = recommend(results, cycles_low=cycles_low, coverage_days=meta.coverage_days,
                     brand=brand)
 
 best = rec.best
 sim = simulate(
-    df.import_kWh.values, df.export_kWh.values, best.Cap_kWh, best.Power_kW,
-    meta.dt_hours, roundtrip_eff, tariff_import, tariff_export, meta.coverage_days,
+    df.import_kWh.values,
+    df.export_kWh.values,
+    best.Cap_kWh,
+    best.Power_kW,
+    meta.dt_hours,
+    roundtrip_eff,
+    tariff_import,
+    tariff_export,
+    meta.coverage_days,
+    timestamps=df.timestamp.values,
+    tariff_import_ht=tariff_import_ht,
+    tariff_import_bt=tariff_import_bt,
+    high_tariff_periods=high_tariff_periods,
+    weekend_low_tariff=weekend_low_tariff,
 )
 
 # --------------------------------------------------------------------------- KPI cards
@@ -246,10 +317,40 @@ st.caption(T(
     cap=f"{big.Cap_kWh:.0f}", power=f"{big.Power_kW:.0f}",
     gain=f"{big.Gain_CHF:,.0f}", cyc=f"{big.Cycles_per_year:.0f}",
 ))
-st.caption(
-    f"Calcul cycles EFC : énergie déchargée / capacité utile "
-    f"({getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.2f} kWh utilisables, SOC min {getattr(sim, 'soc_min_pct', 0):.0f} %)."
-)
+
+with st.expander("Détail du gain tarifaire", expanded=True):
+    tariff_detail = pd.DataFrame(
+        {
+            "Poste": [
+                "Import évité haut tarif",
+                "Import évité bas tarif",
+                "Valeur de revente perdue",
+                "Gain net batterie",
+            ],
+            "kWh/an": [
+                getattr(sim, "import_avoided_ht", 0.0),
+                getattr(sim, "import_avoided_bt", 0.0),
+                getattr(sim, "export_stored", 0.0),
+                "",
+            ],
+            "Tarif CHF/kWh": [
+                tariff_import_ht,
+                tariff_import_bt,
+                tariff_export,
+                "",
+            ],
+            "CHF/an": [
+                getattr(sim, "gain_ht_chf", 0.0),
+                getattr(sim, "gain_bt_chf", 0.0) * -1 if False else -getattr(sim, "export_value_lost_chf", 0.0),
+                "",
+                getattr(sim, "gain_chf", 0.0),
+            ],
+        }
+    )
+    st.dataframe(tariff_detail, use_container_width=True, hide_index=True)
+    st.caption(
+        "Formule : gain = import évité HT × tarif HT + import évité BT × tarif BT - surplus stocké × tarif de revente."
+    )
 
 # Surface the rationale behind the cycles floor (defined in recommend.py / PROJECT_NOTES §6):
 # why we optimize on cycles at all, and why the threshold sits where it does.
@@ -393,9 +494,22 @@ with tab_pay:
     # (price-free use proxy). The recommendation is where they agree; each corrects a
     # different misreading of a single money view.
     pay_caps = list(range(1, int(cap_max) + 1))
-    pay_gs = grid_search(df.import_kWh.values, df.export_kWh.values, pay_caps, powers,
-                         meta.dt_hours, roundtrip_eff, tariff_import, tariff_export,
-                         meta.coverage_days)
+    pay_gs = grid_search(
+        df.import_kWh.values,
+        df.export_kWh.values,
+        pay_caps,
+        powers,
+        meta.dt_hours,
+        roundtrip_eff,
+        tariff_import,
+        tariff_export,
+        meta.coverage_days,
+        timestamps=df.timestamp.values,
+        tariff_import_ht=tariff_import_ht,
+        tariff_import_bt=tariff_import_bt,
+        high_tariff_periods=high_tariff_periods,
+        weekend_low_tariff=weekend_low_tariff,
+    )
     f = pay_gs.loc[pay_gs.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
               .sort_values("Cap_kWh").reset_index(drop=True)
     f["frac_full_per_day"] = f.Cycles_per_year / 365.0
@@ -549,10 +663,22 @@ def _build_pdf(sections) -> bytes:
         # the frame so the PDF never depends on whether the tab was rendered. The money-optimum
         # annotation uses the same dynamic reason as the dashboard (_payback_reason), so the PDF
         # no longer ships the bare "least-bad" label.
-        pay_gs2 = grid_search(df.import_kWh.values, df.export_kWh.values,
-                              list(range(1, int(cap_max) + 1)), powers,
-                              meta.dt_hours, roundtrip_eff, tariff_import, tariff_export,
-                              meta.coverage_days)
+        pay_gs2 = grid_search(
+            df.import_kWh.values,
+            df.export_kWh.values,
+            list(range(1, int(cap_max) + 1)),
+            powers,
+            meta.dt_hours,
+            roundtrip_eff,
+            tariff_import,
+            tariff_export,
+            meta.coverage_days,
+            timestamps=df.timestamp.values,
+            tariff_import_ht=tariff_import_ht,
+            tariff_import_bt=tariff_import_bt,
+            high_tariff_periods=high_tariff_periods,
+            weekend_low_tariff=weekend_low_tariff,
+        )
         fp = pay_gs2.loc[pay_gs2.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
                    .sort_values("Cap_kWh").reset_index(drop=True)
         _price_mid = (cost_price_lo + cost_price_hi) / 2
@@ -619,6 +745,9 @@ def _build_pdf(sections) -> bytes:
         (T("pdf_brand"), brand.name),
         (T("pdf_cycles"), T("pdf_cycles_val", cyc=f"{best.Cycles_per_year:.0f}",
                             low=int(brand.cycles_low), high=int(brand.cycles_high))),
+        ("Import evite HT", f"{getattr(sim, 'import_avoided_ht', 0):,.0f} kWh x {tariff_import_ht:.2f} CHF/kWh"),
+        ("Import evite BT", f"{getattr(sim, 'import_avoided_bt', 0):,.0f} kWh x {tariff_import_bt:.2f} CHF/kWh"),
+        ("Revente perdue", f"{getattr(sim, 'export_stored', 0):,.0f} kWh x {tariff_export:.2f} CHF/kWh"),
         (T("pdf_import_avoided"), T("pdf_energy_val", kwh=f"{sim.import_avoided:,.0f}",
                                     pct=f"{sim.import_reduction:.0%}")),
         (T("pdf_surplus"), T("pdf_energy_val", kwh=f"{sim.export_stored:,.0f}",
