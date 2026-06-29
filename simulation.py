@@ -94,10 +94,10 @@ class SimResult:
     export_stored: float       # = energy taken from surplus to charge
     gain_chf: float            # annual financial benefit
     cycles_per_year: float
-    usable_capacity_kWh: float
-    soc_min_pct: float
-    charge_total_kWh: float
-    discharge_total_kWh: float
+    usable_capacity_kWh: float  # usable capacity above SOC minimum
+    soc_min_pct: float          # reserved SOC minimum
+    charge_total_kWh: float     # energy taken from surplus to charge the battery
+    discharge_total_kWh: float  # energy delivered by the battery to the load
     surplus_captured: float    # fraction of solar surplus the battery soaks up (0..1)
     import_reduction: float    # fraction of grid import avoided (0..1)
 
