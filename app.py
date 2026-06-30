@@ -34,6 +34,142 @@ from grd_profiles import GRD_PROFILES
 
 st.set_page_config(page_title="Battery Sizer", layout="wide", page_icon="🔋")
 
+
+st.markdown(
+    """
+    <style>
+    :root {
+        --card-bg: rgba(17, 24, 39, 0.72);
+        --card-border: rgba(148, 163, 184, 0.20);
+        --muted: #94a3b8;
+        --blue: #3b82f6;
+        --green: #4ade80;
+        --orange: #fb923c;
+        --purple: #a855f7;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1500px;
+    }
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .mar-summary-title {
+        font-size: 1.65rem;
+        font-weight: 800;
+        letter-spacing: .02em;
+        margin: 1.4rem 0 .8rem 0;
+        text-transform: uppercase;
+    }
+    .mar-card-grid-5 {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(150px, 1fr));
+        gap: 14px;
+        margin-bottom: 14px;
+    }
+    .mar-card-grid-6 {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(130px, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+    }
+    .mar-card {
+        background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(2, 6, 23, 0.88));
+        border: 1px solid var(--card-border);
+        border-radius: 14px;
+        padding: 16px 18px;
+        min-height: 128px;
+        box-shadow: 0 14px 35px rgba(0,0,0,.22);
+    }
+    .mar-card.small {
+        min-height: 118px;
+        padding: 14px 16px;
+    }
+    .mar-label {
+        color: #e5e7eb;
+        font-size: .94rem;
+        font-weight: 700;
+        margin-bottom: 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .mar-icon {
+        font-size: 1.35rem;
+        line-height: 1;
+    }
+    .mar-value {
+        font-size: 2.05rem;
+        font-weight: 800;
+        line-height: 1.05;
+        white-space: nowrap;
+    }
+    .mar-value.small {
+        font-size: 1.8rem;
+    }
+    .mar-sub {
+        color: var(--muted);
+        font-size: .85rem;
+        margin-top: 8px;
+    }
+    .mar-blue { color: var(--blue); }
+    .mar-green { color: var(--green); }
+    .mar-orange { color: var(--orange); }
+    .mar-purple { color: var(--purple); }
+    .mar-autoconso {
+        background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.90));
+        border: 1px solid var(--card-border);
+        border-radius: 14px;
+        padding: 18px 22px;
+        margin: 8px 0 20px 0;
+        box-shadow: 0 14px 35px rgba(0,0,0,.22);
+    }
+    .mar-autoconso-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 18px;
+        text-align: center;
+        margin-top: 10px;
+    }
+    .mar-autoconso-cell {
+        border-left: 1px solid rgba(148, 163, 184, 0.25);
+    }
+    .mar-autoconso-cell:first-child {
+        border-left: none;
+    }
+    .mar-pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: .78rem;
+        font-weight: 700;
+        background: rgba(34, 197, 94, .15);
+        color: #86efac;
+        margin-top: 8px;
+    }
+    @media (max-width: 1100px) {
+        .mar-card-grid-5, .mar-card-grid-6 {
+            grid-template-columns: repeat(2, minmax(160px, 1fr));
+        }
+        .mar-autoconso-grid {
+            grid-template-columns: 1fr;
+        }
+        .mar-autoconso-cell {
+            border-left: none;
+            border-top: 1px solid rgba(148, 163, 184, 0.25);
+            padding-top: 12px;
+        }
+        .mar-autoconso-cell:first-child {
+            border-top: none;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 # --------------------------------------------------------------------------- language
 lang_label = st.sidebar.selectbox("Langue / Language", list(LANGS), index=0, key="lang")
 L = LANGS[lang_label]
@@ -132,15 +268,13 @@ tariff_import = tariff_import_ht  # compatibilité avec les anciens textes/graph
 
 roundtrip_eff = st.sidebar.slider(T("roundtrip"), 0.50, 1.0, 0.92, key="roundtrip")
 
-# Battery cost assumptions, drive the "Payback" tab only (not the recommendation, which is
-# price-free on purpose). Defaults are mid Swiss retrofit figures.
-with st.sidebar.expander(T("costs_header")):
-    cc1, cc2 = st.columns(2)
-    cost_price_lo = cc1.number_input(T("cost_price_lo"), 100, 3000, 600, step=50, key="cost_lo")
-    cost_price_hi = cc2.number_input(T("cost_price_hi"), 100, 3000, 1000, step=50, key="cost_hi")
-    cost_fixed = st.number_input(T("cost_fixed"), 0, 20000, 4000, step=250,
-                                 help=T("cost_fixed_help"), key="cost_fixed")
-    cost_life = st.number_input(T("cost_life"), 1, 30, 13, key="cost_life")
+# Coûts batterie masqués : le dimensionnement principal utilise uniquement
+# les flux import/export et les tarifs HT/BT/rachat.
+# Ces valeurs restent définies pour ne pas casser les anciens graphiques/PDF.
+cost_price_lo = 600
+cost_price_hi = 1000
+cost_fixed = 4000
+cost_life = 13
 
 st.sidebar.markdown(T("search_range"))
 c1, c2 = st.sidebar.columns(2)
@@ -313,30 +447,140 @@ sim = simulate(
 )
 
 # --------------------------------------------------------------------------- KPI cards
-st.subheader(T("recommendation"))
-k = st.columns(5)
-k[0].metric(T("kpi_capacity"), f"{best.Cap_kWh:.0f} kWh")
-k[1].metric(T("kpi_power"), f"{best.Power_kW:.0f} kW")
-k[2].metric(T("kpi_savings"), T("savings_unit", v=f"{best.Gain_CHF:,.0f}"))
-k[3].metric(
-    T("kpi_cycles"), T("per_year", v=f"{best.Cycles_per_year:.0f}"),
-    delta=T("delta_vs_max", v=f"{best.Cycles_per_year - rec.max_gain_pick.Cycles_per_year:+.0f}"),
+def _fmt_kwh(v: float) -> str:
+    return f"{float(v):,.0f}".replace(",", " ")
+
+def _fmt_chf(v: float) -> str:
+    return f"{float(v):,.0f}".replace(",", " ")
+
+import_before_total = float(sim.import_before)
+import_after_total = float(sim.import_after_total)
+import_avoided_total = float(sim.import_avoided)
+
+export_before_total = float(sim.export_before)
+export_after_total = float(sim.export_after_total)
+export_avoided_total = float(sim.export_stored)
+
+import_reduction_pct = (import_avoided_total / import_before_total * 100) if import_before_total > 0 else 0.0
+export_reduction_pct = (export_avoided_total / export_before_total * 100) if export_before_total > 0 else 0.0
+
+# Avec seulement import/export, on ne connaît pas toujours la production totale.
+# On affiche donc l'augmentation d'autoconsommation comme surplus PV récupéré sur place.
+autoconso_gain_pct = export_reduction_pct
+
+big = rec.max_gain_pick
+gain_share = (float(best.Gain_CHF) / float(rec.gain_max) * 100) if rec.gain_max > 0 else 0.0
+gain_max_extra = float(rec.gain_max - best.Gain_CHF)
+
+st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
+
+st.markdown(
+    f"""
+    <div class="mar-card-grid-5">
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">🔋</span>Capacité batterie</div>
+            <div class="mar-value mar-blue">{best.Cap_kWh:.0f} kWh</div>
+            <div class="mar-sub">Capacité proposée</div>
+        </div>
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">⚡</span>Puissance batterie</div>
+            <div class="mar-value mar-blue">{best.Power_kW:.0f} kW</div>
+            <div class="mar-sub">Puissance de charge/décharge</div>
+        </div>
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">💰</span>Économies annuelles</div>
+            <div class="mar-value mar-green">{_fmt_chf(best.Gain_CHF)} CHF/an</div>
+            <div class="mar-sub">Gain net HT/BT/revente</div>
+        </div>
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">♻️</span>Cycles équivalents</div>
+            <div class="mar-value mar-purple">{best.Cycles_per_year:.0f}/an</div>
+            <div class="mar-pill">{gain_share:.0f}% du gain maximal</div>
+        </div>
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">🟠</span>Surplus capté</div>
+            <div class="mar-value mar-orange">{sim.surplus_captured:.0%}</div>
+            <div class="mar-sub">du surplus solaire</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
-k[4].metric(T("kpi_surplus"), f"{sim.surplus_captured:.0%}")
+
+st.markdown(
+    f"""
+    <div class="mar-card-grid-6">
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">🔌</span>Import avant</div>
+            <div class="mar-value small mar-blue">{_fmt_kwh(import_before_total)} kWh</div>
+            <div class="mar-sub">Depuis le réseau</div>
+        </div>
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">🏠</span>Import après</div>
+            <div class="mar-value small mar-blue">{_fmt_kwh(import_after_total)} kWh</div>
+            <div class="mar-sub">Depuis le réseau</div>
+        </div>
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">⬇️</span>Import évité</div>
+            <div class="mar-value small mar-green">{_fmt_kwh(import_avoided_total)} kWh</div>
+            <div class="mar-sub">-{import_reduction_pct:.0f} %</div>
+        </div>
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">🔆</span>Export avant</div>
+            <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
+            <div class="mar-sub">Vers le réseau</div>
+        </div>
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">🏡</span>Export après</div>
+            <div class="mar-value small mar-orange">{_fmt_kwh(export_after_total)} kWh</div>
+            <div class="mar-sub">Vers le réseau</div>
+        </div>
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">⬇️</span>Export évité</div>
+            <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
+            <div class="mar-sub">-{export_reduction_pct:.0f} %</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f"""
+    <div class="mar-autoconso">
+        <div class="mar-label"><span class="mar-icon">☀️</span>Autoconsommation / valorisation du surplus solaire</div>
+        <div class="mar-autoconso-grid">
+            <div>
+                <div class="mar-sub">Surplus initial</div>
+                <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
+            </div>
+            <div class="mar-autoconso-cell">
+                <div class="mar-sub">Surplus stocké par la batterie</div>
+                <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
+            </div>
+            <div class="mar-autoconso-cell">
+                <div class="mar-sub">Augmentation d'autoconsommation</div>
+                <div class="mar-value small mar-green">+{autoconso_gain_pct:.0f} %</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if gain_max_extra > 0:
+    st.caption(
+        f"Le gain maximum testé est de {_fmt_chf(rec.gain_max)} CHF/an avec "
+        f"{big.Cap_kWh:.0f} kWh. La solution proposée atteint {gain_share:.0f}% de ce gain ; "
+        f"aller au maximum n'ajoute que {_fmt_chf(gain_max_extra)} CHF/an."
+    )
 
 for code, params in rec.warnings:
     (st.error if code in ERROR_CODES else st.warning)(msg(L, code, params))
 for code, params in rec.notes:
     st.caption("• " + msg(L, code, params))
 
-big = rec.max_gain_pick
-st.caption(T(
-    "compare_caption",
-    cap=f"{big.Cap_kWh:.0f}", power=f"{big.Power_kW:.0f}",
-    gain=f"{big.Gain_CHF:,.0f}", cyc=f"{big.Cycles_per_year:.0f}",
-))
-
-with st.expander("Détail du gain tarifaire", expanded=True):
+with st.expander("Détail du gain tarifaire", expanded=False):
     tariff_detail = pd.DataFrame(
         {
             "Poste": [
@@ -359,8 +603,8 @@ with st.expander("Détail du gain tarifaire", expanded=True):
             ],
             "CHF/an": [
                 getattr(sim, "gain_ht_chf", 0.0),
-                getattr(sim, "gain_bt_chf", 0.0) * -1 if False else -getattr(sim, "export_value_lost_chf", 0.0),
-                "",
+                getattr(sim, "gain_bt_chf", 0.0),
+                -getattr(sim, "export_value_lost_chf", 0.0),
                 getattr(sim, "gain_chf", 0.0),
             ],
         }
