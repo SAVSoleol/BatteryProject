@@ -49,18 +49,10 @@ def T(key: str, **fmt) -> str:
 # them, and drop the uploaded files, on every language change.)
 st.sidebar.header(T("settings_header"))
 
-# Battery brand: sets the healthy cycle band + the warranty sources shown. GoodWe is the
-# installer's actual hardware and the default; Huawei here is the meter/data source.
-brand_key = st.sidebar.selectbox(
-    T("brand_label"), list(BRANDS), index=0,
-    format_func=lambda k: BRANDS[k].name, help=T("brand_help"), key="brand",
-)
-brand = BRANDS[brand_key]
-with st.sidebar.expander(T("brand_sources_header")):
-    st.caption(T("brand_design_point", cpy=brand.design_cycles_yr))
-    st.caption(T(f"brand_note_{brand.key}"))
-    for label, url in brand.sources:
-        st.markdown(f"- [{label}]({url})")
+# Marque batterie masquée pour l'instant.
+# Le moteur garde GoodWe comme référence interne pour les seuils techniques,
+# mais l'utilisateur ne voit plus le choix de marque ni les sources cycles.
+brand = BRANDS["goodwe"]
 
 st.sidebar.markdown("**Tarifs énergie**")
 
@@ -163,7 +155,7 @@ p_step = c2.number_input(T("p_step"), 1, 20, 1, key="p_step")
 # new brand's default (a shared key would freeze the value across brand changes).
 cycles_low = st.sidebar.slider(
     T("cycles_thresh"), 100, 400, int(brand.cycles_low), step=10,
-    help=T("cycles_thresh_help"), key=f"cycles_low_{brand.key}",
+    help=T("cycles_thresh_help"), key="cycles_low",
 )
 st.sidebar.caption(
     T("healthy_band_caption", low=int(brand.cycles_low), high=int(brand.cycles_high))
