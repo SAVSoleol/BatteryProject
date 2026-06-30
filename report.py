@@ -139,7 +139,7 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str):
     pdf.set_xy(8, 12)
     pdf.set_font("Arial", "B", 16)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(36, 8, "SOLEOL", ln=True)
+    pdf.cell(36, 8, "SOLEOL SA", ln=True)
     pdf.set_x(8)
     pdf.set_font("Arial", "", 8)
     pdf.set_text_color(230, 235, 240)
@@ -236,26 +236,23 @@ def _plot_monthly(df, sim) -> BytesIO:
         index=pd.to_datetime(df.timestamp),
     ).resample("MS").sum()
     months = s.index.strftime("%Y-%m")
-    x = np.arange(len(months))
-    w = 0.20
+
     fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.bar(x - 1.5 * w, s["Import avant"], w, label="Import avant")
-    ax.bar(x - 0.5 * w, s["Import apres"], w, label="Import apres")
-    ax.bar(x + 0.5 * w, s["Export avant"], w, label="Export avant")
-    ax.bar(x + 1.5 * w, s["Export apres"], w, label="Export apres")
-    ax.set_xticks(x)
-    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=7)
+    ax.plot(months, s["Import avant"], marker="o", lw=2.0, label="Import avant")
+    ax.plot(months, s["Import apres"], marker="o", lw=2.0, label="Import apres")
+    ax.plot(months, s["Export avant"], marker="o", lw=2.0, label="Export avant")
+    ax.plot(months, s["Export apres"], marker="o", lw=2.0, label="Export apres")
     ax.set_ylabel("kWh/mois")
-    ax.set_title("Avant / Apres par mois", fontsize=11, weight="bold")
+    ax.set_title("Evolution mensuelle avant / apres batterie", fontsize=11, weight="bold")
     ax.legend(ncol=4, fontsize=8)
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(alpha=0.25)
+    ax.tick_params(axis="x", rotation=45, labelsize=7)
     fig.tight_layout()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
     buf.seek(0)
     return buf
-
 
 def _plot_soc(df, sim, best) -> BytesIO:
     usable = getattr(sim, "usable_capacity_kWh", float(best.Cap_kWh))
@@ -316,19 +313,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
         f"et d'eviter {_kwh(import_avoided)} kWh/an d'achat reseau. "
         f"Cette capacite represente un bon compromis entre energie valorisee et capacite installee. "
-        f"Le gain financier estime est indique dans l'analyse detaillee."
+        f"Les hypotheses techniques sont indiquees dans l'analyse detaillee."
     )
     _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
-
-    # Mini gauge
-    pdf.set_xy(x0 + 104, 145)
-    pdf.set_font("Arial", "B", 18)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(30, 8, f"+{export_reduc:.0f}%", align="C")
-    pdf.set_xy(x0 + 102, 154)
-    pdf.set_font("Arial", "", 7)
-    pdf.set_text_color(*MUTED)
-    pdf.cell(35, 4, _tx("surplus valorise"), align="C")
 
     pdf.set_xy(x0, 184)
     pdf.set_font("Arial", "", 7)
@@ -360,131 +347,65 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
     pdf.add_page()
     pdf.set_font("Arial", "B", 15)
     pdf.set_text_color(*TEXT)
-    pdf.cell(0, 9, _tx("Analyse detaillee"), ln=True)
+    pdf.cell(0, 9, _tx("Analyse technique"), ln=True)
 
-    x = 10
-    y = 25
-    pdf.set_font("Arial", "B", 10)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(90, 6, _tx("DETAIL ECONOMIQUE"), ln=True)
-
-    rows = [
-        ("Import evite - Haut tarif", f"{_kwh(getattr(sim, 'import_avoided_ht', 0))} kWh x {tariff_import_ht:.2f}", f"{_chf(getattr(sim, 'gain_ht_chf', 0))} CHF"),
-        ("Import evite - Bas tarif", f"{_kwh(getattr(sim, 'import_avoided_bt', 0))} kWh x {tariff_import_bt:.2f}", f"{_chf(getattr(sim, 'gain_bt_chf', 0))} CHF"),
-        ("Revente perdue", f"{_kwh(getattr(sim, 'export_stored', 0))} kWh x {tariff_export:.2f}", f"-{_chf(getattr(sim, 'export_value_lost_chf', 0))} CHF"),
-        ("Gain financier estime", "", f"{_chf(sim.gain_chf)} CHF"),
-    ]
-    yy = y + 10
-    for label, detail, value in rows:
-        pdf.set_xy(x, yy)
-        pdf.set_font("Arial", "B" if "nettes" in label.lower() else "", 8)
-        pdf.set_text_color(*TEXT)
-        pdf.cell(70, 6, _tx(label))
-        pdf.cell(55, 6, _tx(detail))
-        pdf.cell(40, 6, _tx(value), align="R", ln=True)
-        yy += 7
+    import_after = sim.import_after_total
+    export_after = sim.export_after_total
+    import_avoided = sim.import_avoided
+    export_avoided = sim.export_stored
+    import_reduc = _safe_pct(import_avoided, sim.import_before)
+    export_reduc = _safe_pct(export_avoided, sim.export_before)
 
     _info_box(
         pdf,
         10,
-        70,
+        25,
         90,
-        28,
-        "PARAMETRES",
-        f"Profil GRD : {tariff_profile}\nRendement batterie : voir parametres de simulation\nPas de temps : {meta.dt_hours * 60:.0f} min\nCouverture : {meta.coverage_days:.0f} jours",
+        34,
+        "FLUX RESEAU",
+        f"Import avant : {_kwh(sim.import_before)} kWh\n"
+        f"Import apres : {_kwh(import_after)} kWh\n"
+        f"Import evite : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
+        f"Export evite : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
         fill=LIGHT_BG,
         border=BORDER,
     )
+
     _info_box(
         pdf,
         108,
-        70,
+        25,
         90,
-        28,
-        "CYCLES BATTERIE",
-        f"Cycles equivalents : {best.Cycles_per_year:.0f} cycles/an\nCapacite utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh\nSOC minimum : {getattr(sim, 'soc_min_pct', 0):.0f} %",
+        34,
+        "BATTERIE",
+        f"Capacite nominale : {best.Cap_kWh:.0f} kWh\n"
+        f"Puissance : {best.Power_kW:.0f} kW\n"
+        f"Cycles equivalents : {best.Cycles_per_year:.0f} cycles/an\n"
+        f"Capacite utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh",
         fill=LIGHT_GREEN,
         border=GREEN,
     )
 
+    _info_box(
+        pdf,
+        10,
+        68,
+        188,
+        22,
+        "HYPOTHESES",
+        f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | Couverture : {meta.coverage_days:.0f} jours | "
+        f"Tarifs utilises dans le calcul interne : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, rachat {tariff_export:.2f} CHF/kWh.",
+        fill=LIGHT_ORANGE,
+        border=SOLEOL_ORANGE,
+    )
+
     soc = _plot_soc(df, sim, best)
-    pdf.image(soc, x=10, y=115, w=188)
+    pdf.image(soc, x=10, y=105, w=188)
 
     pdf.set_xy(10, 242)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(188, 4, _tx("L'etat de charge permet de verifier si la batterie est utilisee regulierement ou si une partie de la capacite reste inactive."))
-
-
-def _page_4(pdf, rec, best, sim):
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 15)
-    pdf.set_text_color(*TEXT)
-    pdf.cell(0, 9, _tx("Tableau des capacites simulees"), ln=True)
-
-    f = rec.frontier.copy().sort_values("Cap_kWh")
-    f["Gain_pct"] = f.Gain_CHF / rec.gain_max * 100 if rec.gain_max > 0 else 0
-    f["Gain_sup"] = f.Gain_CHF.diff().fillna(0)
-
-    cols = [
-        ("Cap. kWh", 18),
-        ("Puiss. kW", 18),
-        ("Gain CHF/an", 24),
-        ("% gain max", 23),
-        ("Gain sup.", 22),
-        ("Import evite", 32),
-        ("Export stocke", 32),
-        ("Cycles", 20),
-    ]
-    x = 10
-    y = 25
-    pdf.set_fill_color(*SOLEOL_ORANGE)
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Arial", "B", 7)
-    xx = x
-    for label, w in cols:
-        pdf.rect(xx, y, w, 8, style="F")
-        pdf.set_xy(xx, y + 2)
-        pdf.cell(w, 4, _tx(label), align="C")
-        xx += w
-
-    pdf.set_font("Arial", "", 7)
-    max_rows = min(len(f), 24)
-    for i, (_, row) in enumerate(f.head(max_rows).iterrows()):
-        yy = y + 8 + i * 7
-        is_best = abs(float(row.Cap_kWh) - float(best.Cap_kWh)) < 1e-9
-        if is_best:
-            pdf.set_fill_color(220, 245, 225)
-        else:
-            pdf.set_fill_color(255, 255, 255) if i % 2 == 0 else pdf.set_fill_color(247, 249, 251)
-        pdf.rect(x, yy, sum(w for _, w in cols), 7, style="F")
-        pdf.set_text_color(*TEXT)
-        vals = [
-            f"{row.Cap_kWh:.0f}" + (" *" if is_best else ""),
-            f"{row.Power_kW:.0f}",
-            _chf(row.Gain_CHF),
-            f"{row.Gain_pct:.0f}%",
-            _chf(row.Gain_sup),
-            _kwh(row.Import_avoided_kWh),
-            _kwh(row.Export_stored_kWh),
-            f"{row.Cycles_per_year:.0f}",
-        ]
-        xx = x
-        for val, (_, w) in zip(vals, cols):
-            pdf.set_xy(xx, yy + 2)
-            pdf.cell(w, 4, _tx(val), align="C")
-            xx += w
-
-    _info_box(
-        pdf,
-        10,
-        220,
-        188,
-        26,
-        "LECTURE DU TABLEAU",
-        f"La ligne marquee * correspond a la capacite recommandee. Elle offre un compromis entre import evite, surplus valorise et taille de batterie. Les capacites plus grandes augmentent peu l\'energie valorisee.",
-    )
-
 
 def generate_battery_report(
     *,
@@ -510,6 +431,5 @@ def generate_battery_report(
     _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra)
     _page_2(pdf, df, meta, rec, best, big, sim)
     _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export)
-    _page_4(pdf, rec, best, sim)
 
     return _pdf_bytes(pdf)
