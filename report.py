@@ -178,16 +178,16 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str):
 def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
     f = frontier.copy()
     fig, ax = plt.subplots(figsize=(7.2, 4.0))
-    ax.plot(f.Cap_kWh, f.Gain_CHF, "-o", lw=2.2)
+    ax.plot(f.Cap_kWh, f.Import_avoided_kWh, "-o", lw=2.2)
     ax.axvline(float(best.Cap_kWh), color="gray", ls="--", lw=1)
-    ax.scatter([float(best.Cap_kWh)], [float(best.Gain_CHF)], s=80, zorder=3)
-    ax.set_title("Gain annuel selon la capacite batterie", fontsize=11, weight="bold")
+    ax.scatter([float(best.Cap_kWh)], [float(best.Import_avoided_kWh)], s=80, zorder=3)
+    ax.set_title("Energie valorisee selon la capacite batterie", fontsize=11, weight="bold")
     ax.set_xlabel("Capacite batterie (kWh)")
-    ax.set_ylabel("Economies annuelles (CHF/an)")
+    ax.set_ylabel("Import evite (kWh/an)")
     ax.grid(alpha=0.25)
     ax.annotate(
-        f"{best.Cap_kWh:.0f} kWh\n{best.Gain_CHF:.0f} CHF/an",
-        xy=(float(best.Cap_kWh), float(best.Gain_CHF)),
+        f"{best.Cap_kWh:.0f} kWh\n{best.Import_avoided_kWh:.0f} kWh/an",
+        xy=(float(best.Cap_kWh), float(best.Import_avoided_kWh)),
         xytext=(10, 20),
         textcoords="offset points",
         fontsize=8,
@@ -282,12 +282,12 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.set_xy(x0, 14)
     pdf.set_font("Arial", "B", 17)
     pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(140, 8, _tx("BATTERIE RECOMMANDEE"), ln=True)
+    pdf.cell(140, 8, _tx("SYNTHESE ENERGETIQUE"), ln=True)
 
     # Main metrics
     _metric_box(pdf, x0, 30, 43, 28, "Capacite", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
     _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Economies annuelles", f"{_chf(best.Gain_CHF)} CHF/an", "Gain net estime", color=SOLEOL_ORANGE)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisee", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=SOLEOL_ORANGE)
 
     import_after = sim.import_after_total
     export_after = sim.export_after_total
@@ -312,22 +312,22 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     _metric_box(pdf, x0 + 3 * (w + gap), y2, w, h, "Cycles", f"{best.Cycles_per_year:.0f}/an", "equivalents", color=PURPLE)
 
     conclusion = (
-        f"Une batterie de {best.Cap_kWh:.0f} kWh permet de valoriser {_kwh(export_avoided)} kWh/an de surplus "
+        f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
         f"et d'eviter {_kwh(import_avoided)} kWh/an d'achat reseau. "
-        f"Elle atteint {gain_share:.0f}% du gain maximal teste. "
-        f"Au-dela, le gain supplementaire restant est d'environ {_chf(gain_max_extra)} CHF/an."
+        f"Cette capacite represente un bon compromis entre energie valorisee et capacite installee. "
+        f"Le gain financier estime est indique dans l'analyse detaillee."
     )
-    _info_box(pdf, x0, 137, 144, 34, "CONCLUSION", conclusion)
+    _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
     # Mini gauge
     pdf.set_xy(x0 + 104, 145)
     pdf.set_font("Arial", "B", 18)
     pdf.set_text_color(*GREEN)
-    pdf.cell(30, 8, f"{gain_share:.0f}%", align="C")
+    pdf.cell(30, 8, f"+{export_reduc:.0f}%", align="C")
     pdf.set_xy(x0 + 102, 154)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
-    pdf.cell(35, 4, _tx("du gain maximal"), align="C")
+    pdf.cell(35, 4, _tx("surplus valorise"), align="C")
 
     pdf.set_xy(x0, 184)
     pdf.set_font("Arial", "", 7)
@@ -352,7 +352,7 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     pdf.set_xy(10, 275)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("Le graphique de gain montre ou la courbe commence a s'aplatir. Le graphique avant/apres montre l'effet de la batterie sur l'import et l'export reseau."))
+    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'energie achetee au reseau qui peut etre evitee selon la capacite batterie. Les graphiques avant/apres montrent l'effet sur les flux reseau."))
 
 
 def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
@@ -365,13 +365,13 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
     y = 25
     pdf.set_font("Arial", "B", 10)
     pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(90, 6, _tx("DETAIL DES ECONOMIES ANNUELLES"), ln=True)
+    pdf.cell(90, 6, _tx("DETAIL ECONOMIQUE"), ln=True)
 
     rows = [
         ("Import evite - Haut tarif", f"{_kwh(getattr(sim, 'import_avoided_ht', 0))} kWh x {tariff_import_ht:.2f}", f"{_chf(getattr(sim, 'gain_ht_chf', 0))} CHF"),
         ("Import evite - Bas tarif", f"{_kwh(getattr(sim, 'import_avoided_bt', 0))} kWh x {tariff_import_bt:.2f}", f"{_chf(getattr(sim, 'gain_bt_chf', 0))} CHF"),
         ("Revente perdue", f"{_kwh(getattr(sim, 'export_stored', 0))} kWh x {tariff_export:.2f}", f"-{_chf(getattr(sim, 'export_value_lost_chf', 0))} CHF"),
-        ("Economies nettes", "", f"{_chf(sim.gain_chf)} CHF"),
+        ("Gain financier estime", "", f"{_chf(sim.gain_chf)} CHF"),
     ]
     yy = y + 10
     for label, detail, value in rows:
@@ -428,11 +428,11 @@ def _page_4(pdf, rec, best, sim):
     cols = [
         ("Cap. kWh", 18),
         ("Puiss. kW", 18),
-        ("Gain CHF/an", 28),
+        ("Gain CHF/an", 24),
         ("% gain max", 23),
         ("Gain sup.", 22),
-        ("Import evite", 30),
-        ("Export stocke", 30),
+        ("Import evite", 32),
+        ("Export stocke", 32),
         ("Cycles", 20),
     ]
     x = 10
@@ -481,7 +481,7 @@ def _page_4(pdf, rec, best, sim):
         188,
         26,
         "LECTURE DU TABLEAU",
-        f"La ligne marquee * correspond a la capacite recommandee. Elle atteint environ {float(best.Gain_CHF) / float(rec.gain_max) * 100 if rec.gain_max > 0 else 0:.0f}% du gain maximal teste. Les capacites plus grandes augmentent peu le gain annuel.",
+        f"La ligne marquee * correspond a la capacite recommandee. Elle offre un compromis entre import evite, surplus valorise et taille de batterie. Les capacites plus grandes augmentent peu l\'energie valorisee.",
     )
 
 
