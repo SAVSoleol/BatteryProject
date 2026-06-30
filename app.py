@@ -30,6 +30,7 @@ from i18n import ERROR_CODES, LANGS, msg, t
 from loaders import UnsupportedFormatError, _finalize, load_meter_file
 from recommend import BRANDS, recommend
 from simulation import grid_search, simulate
+from grd_profiles import GRD_PROFILES
 
 st.set_page_config(page_title="Battery Sizer", layout="wide", page_icon="🔋")
 
@@ -62,55 +63,80 @@ with st.sidebar.expander(T("brand_sources_header")):
         st.markdown(f"- [{label}]({url})")
 
 st.sidebar.markdown("**Tarifs énergie**")
+
+tariff_profiles = GRD_PROFILES
+
+
+tariff_profile = st.sidebar.selectbox(
+    "Profil tarifaire GRD",
+    list(tariff_profiles),
+    index=0,
+    key="tariff_profile",
+)
+profile = tariff_profiles[tariff_profile]
+
+if profile.get("needs_verification", False):
+    st.sidebar.warning(
+        "Tarifs préremplis à vérifier : renseigne les valeurs exactes du contrat client "
+        "ou mets à jour grd_profiles.py."
+    )
+
+manual_tariffs = st.sidebar.checkbox(
+    "Modifier manuellement les tarifs",
+    value=True,
+    key=f"manual_tariffs_{tariff_profile}",
+)
+
 tariff_import_ht = st.sidebar.number_input(
     "Tarif achat haut tarif (CHF/kWh)",
-    value=0.32,
+    value=float(profile["ht"]),
     step=0.01,
     format="%.2f",
-    key="tariff_import_ht",
+    key=f"tariff_import_ht_{tariff_profile}",
+    disabled=not manual_tariffs,
 )
 tariff_import_bt = st.sidebar.number_input(
     "Tarif achat bas tarif (CHF/kWh)",
-    value=0.21,
+    value=float(profile["bt"]),
     step=0.01,
     format="%.2f",
-    key="tariff_import_bt",
+    key=f"tariff_import_bt_{tariff_profile}",
+    disabled=not manual_tariffs,
 )
 tariff_export = st.sidebar.number_input(
-    T("tariff_export"),
-    value=0.08,
+    "Tarif rachat / revente (CHF/kWh)",
+    value=float(profile["export"]),
     step=0.01,
     format="%.2f",
-    key="tariff_export",
+    key=f"tariff_export_{tariff_profile}",
+    disabled=not manual_tariffs,
 )
 
-with st.sidebar.expander("Plages haut tarif", expanded=False):
-    ht_start = st.number_input(
-        "Début haut tarif",
-        min_value=0.0,
-        max_value=24.0,
-        value=7.0,
-        step=0.5,
-        format="%.1f",
-        key="ht_start",
-    )
-    ht_end = st.number_input(
-        "Fin haut tarif",
-        min_value=0.0,
-        max_value=24.0,
-        value=22.0,
-        step=0.5,
-        format="%.1f",
-        key="ht_end",
-    )
-    weekend_low_tariff = st.checkbox(
-        "Week-end en bas tarif",
-        value=False,
-        key="weekend_low_tariff",
-    )
+if tariff_profile == "Personnalise":
+    with st.sidebar.expander("Plages haut tarif personnalisées", expanded=True):
+        ht1_start = st.number_input("HT 1 début", 0.0, 24.0, 7.0, step=0.5, format="%.1f", key="custom_ht1_start")
+        ht1_end = st.number_input("HT 1 fin", 0.0, 24.0, 12.0, step=0.5, format="%.1f", key="custom_ht1_end")
+        use_ht2 = st.checkbox("Ajouter une 2e plage HT", value=True, key="custom_use_ht2")
+        if use_ht2:
+            ht2_start = st.number_input("HT 2 début", 0.0, 24.0, 17.0, step=0.5, format="%.1f", key="custom_ht2_start")
+            ht2_end = st.number_input("HT 2 fin", 0.0, 24.0, 23.0, step=0.5, format="%.1f", key="custom_ht2_end")
+            high_tariff_periods = ((float(ht1_start), float(ht1_end)), (float(ht2_start), float(ht2_end)))
+        else:
+            high_tariff_periods = ((float(ht1_start), float(ht1_end)),)
+
+        weekend_low_tariff = st.checkbox(
+            "Week-end entièrement en bas tarif",
+            value=False,
+            key="custom_weekend_low_tariff",
+        )
+else:
+    with st.sidebar.expander(f"Plages tarifaires {tariff_profile}", expanded=False):
+        st.caption(profile["description"])
+        st.caption(f"Source / note : {profile.get('source', 'à vérifier')}")
+    high_tariff_periods = profile["periods"]
+    weekend_low_tariff = bool(profile["weekend_low"])
 
 tariff_import = tariff_import_ht  # compatibilité avec les anciens textes/graphes
-high_tariff_periods = ((float(ht_start), float(ht_end)),)
 
 roundtrip_eff = st.sidebar.slider(T("roundtrip"), 0.50, 1.0, 0.92, key="roundtrip")
 
@@ -349,7 +375,10 @@ with st.expander("Détail du gain tarifaire", expanded=True):
     )
     st.dataframe(tariff_detail, use_container_width=True, hide_index=True)
     st.caption(
-        "Formule : gain = import évité HT × tarif HT + import évité BT × tarif BT - surplus stocké × tarif de revente."
+        f"Formule : gain = import évité HT × {tariff_import_ht:.2f} "
+        f"+ import évité BT × {tariff_import_bt:.2f} "
+        f"- surplus stocké × {tariff_export:.2f}. "
+        f"Profil utilisé : {tariff_profile}."
     )
 
 # Surface the rationale behind the cycles floor (defined in recommend.py / PROJECT_NOTES §6):
@@ -745,6 +774,7 @@ def _build_pdf(sections) -> bytes:
         (T("pdf_brand"), brand.name),
         (T("pdf_cycles"), T("pdf_cycles_val", cyc=f"{best.Cycles_per_year:.0f}",
                             low=int(brand.cycles_low), high=int(brand.cycles_high))),
+        ("Profil tarifaire", tariff_profile),
         ("Import evite HT", f"{getattr(sim, 'import_avoided_ht', 0):,.0f} kWh x {tariff_import_ht:.2f} CHF/kWh"),
         ("Import evite BT", f"{getattr(sim, 'import_avoided_bt', 0):,.0f} kWh x {tariff_import_bt:.2f} CHF/kWh"),
         ("Revente perdue", f"{getattr(sim, 'export_stored', 0):,.0f} kWh x {tariff_export:.2f} CHF/kWh"),
