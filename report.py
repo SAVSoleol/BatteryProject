@@ -284,17 +284,18 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.set_text_color(*SOLEOL_ORANGE)
     pdf.cell(140, 8, _tx("SYNTHESE ENERGETIQUE"), ln=True)
 
-    # Main metrics
-    _metric_box(pdf, x0, 30, 43, 28, "Capacite", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
-    _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisee", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=SOLEOL_ORANGE)
-
     import_after = sim.import_after_total
     export_after = sim.export_after_total
     import_avoided = sim.import_avoided
     export_avoided = sim.export_stored
     import_reduc = _safe_pct(import_avoided, sim.import_before)
     export_reduc = _safe_pct(export_avoided, sim.export_before)
+
+
+    # Main metrics
+    _metric_box(pdf, x0, 30, 43, 28, "Capacite", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
+    _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisee", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=GREEN)
 
     y = 67
     w = 34
