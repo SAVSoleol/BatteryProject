@@ -102,7 +102,7 @@ def _add_section_title(pdf: FPDF, title: str, x: float, y: float, w: float):
 def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, value: str, sub: str = "", color=BLUE):
     pdf.set_draw_color(*BORDER)
     pdf.set_fill_color(255, 255, 255)
-    pdf.rounded_rect(x, y, w, h, 2, style="DF")
+    pdf.rect(x, y, w, h, style="DF")
     pdf.set_xy(x + 4, y + 4)
     pdf.set_font("Arial", "B", 7)
     pdf.set_text_color(*MUTED)
@@ -121,7 +121,7 @@ def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, v
 def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, text: str, fill=LIGHT_ORANGE, border=SOLEOL_ORANGE):
     pdf.set_draw_color(*border)
     pdf.set_fill_color(*fill)
-    pdf.rounded_rect(x, y, w, h, 2, style="DF")
+    pdf.rect(x, y, w, h, style="DF")
     pdf.set_xy(x + 5, y + 4)
     pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(*border)
