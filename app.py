@@ -30,6 +30,7 @@ from i18n import ERROR_CODES, LANGS, msg, t
 from loaders import UnsupportedFormatError, _finalize, load_meter_file
 from recommend import BRANDS, recommend
 from simulation import grid_search, simulate
+from report import generate_battery_report
 from grd_profiles import GRD_PROFILES
 
 st.set_page_config(page_title="Battery Sizer", layout="wide", page_icon="🔋")
@@ -842,223 +843,31 @@ with tab_ba:
     st.plotly_chart(fig, use_container_width=True)
 
 # --------------------------------------------------------------------------- PDF
-def _tx(s) -> str:
-    """Make text safe for the PDF core (Latin-1) font: swap common Unicode, drop the rest."""
-    repl = {"—": "-", "–": "-", "→": "->", "≥": ">=", "≤": "<=", "≈": "~",
-            "•": "-", "✅": "", "⚠️": "!", "’": "'", "œ": "oe", "…": "..."}
-    s = str(s)
-    for k, v in repl.items():
-        s = s.replace(k, v)
-    return s.encode("latin-1", "replace").decode("latin-1")
-
-
-def _annot_plain(s: str) -> str:
-    """Render a Plotly annotation string for matplotlib: HTML <br>/&lt;/&gt; -> plain text."""
-    return _tx(str(s).replace("<br>", "\n").replace("&lt;", "<").replace("&gt;", ">"))
-
-
-def _pdf_text(s: str) -> str:
-    """A prose string for the PDF body: drop markdown bold markers, then Latin-1-clean."""
-    return _tx(str(s).replace("**", ""))
-
-
-def _build_pdf(sections) -> bytes:
-    # Matplotlib renders for the PDF (reliable, no headless-browser dependency). Only the
-    # charts ticked in the sidebar are built and embedded; the summary table is always in.
-    figs: dict = {}
-    tindex = pd.to_datetime(df.timestamp)
-
-    if "frontier" in sections:
-        fig1, ax = plt.subplots(figsize=(9, 3.2))
-        ax.plot(rec.frontier.Cap_kWh, rec.frontier.Gain_CHF, "b-o", label=T("legend_gain"))
-        ax2 = ax.twinx()
-        ax2.plot(rec.frontier.Cap_kWh, rec.frontier.Cycles_per_year, "g--s", label=T("legend_cycles"))
-        ax2.axhspan(brand.cycles_low, brand.cycles_high, color="green", alpha=0.08)
-        ax.axvline(best.Cap_kWh, color="k", ls=":")
-        ax.set_xlabel(T("pdf_fig1_xlabel")); ax.set_ylabel(T("pdf_fig1_ylabel"))
-        ax2.set_ylabel(T("pdf_fig1_y2label"))
-        ax.set_title(T("pdf_fig1_title")); fig1.tight_layout()
-        figs["frontier"] = [(fig1, T("pdf_cap_frontier"))]
-
-    if "ba" in sections:
-        fig2, axb = plt.subplots(figsize=(9, 3.2))
-        s = pd.DataFrame({"i0": df.import_kWh.values, "i1": sim.import_after,
-                          "e0": df.export_kWh.values, "e1": sim.export_after},
-                         index=tindex).resample("MS").sum()
-        # Grouped bars on a categorical month axis (like the dashboard tab). Lines failed for
-        # short series, a single-month dataset has one point and draws no visible segment.
-        months = s.index.strftime("%Y-%m")
-        x = np.arange(len(months)); w = 0.2
-        axb.bar(x - 1.5 * w, s.i0, w, label=T("ba_import_before"), color="#fca5a5")
-        axb.bar(x - 0.5 * w, s.i1, w, label=T("ba_import_after"), color="#dc2626")
-        axb.bar(x + 0.5 * w, s.e0, w, label=T("ba_export_before"), color="#bfdbfe")
-        axb.bar(x + 1.5 * w, s.e1, w, label=T("ba_export_after"), color="#2563eb")
-        axb.set_xticks(x); axb.set_xticklabels(months, rotation=45, ha="right", fontsize=7)
-        axb.legend(fontsize=7); axb.set_ylabel(T("pdf_fig2_ylabel"))
-        axb.set_title(T("pdf_fig2_title")); fig2.tight_layout()
-        figs["ba"] = [(fig2, T("pdf_cap_ba"))]
-
-    if "soc" in sections:
-        # State of charge over time (matches the "État de charge" tab).
-        fig3, axc = plt.subplots(figsize=(9, 2.8))
-        usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
-        soc_min = getattr(sim, "soc_min_pct", 0.0)
-        soc_pct_pdf = soc_min + (sim.soc / usable_cap * (100.0 - soc_min)) if usable_cap > 0 else sim.soc * 0
-        axc.plot(tindex, soc_pct_pdf, color="#7c3aed", lw=0.6)
-        axc.set_ylabel(T("axis_soc")); axc.set_xlabel(T("axis_date"))
-        axc.set_title(T("soc_title", cap=f"{best.Cap_kWh:.0f}", power=f"{best.Power_kW:.0f}"))
-        fig3.tight_layout()
-        figs["soc"] = [(fig3, T("pdf_cap_soc"))]
-
-    if "cycles" in sections:
-        # Cumulative equivalent cycles, with the steady-pace reference line (the "diagonal").
-        fig4, axd = plt.subplots(figsize=(9, 2.8))
-        usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
-        cum_cycles = np.cumsum(df.import_kWh.values - sim.import_after) / usable_cap if usable_cap > 0 else np.zeros_like(sim.import_after)
-        axd.plot(tindex, cum_cycles, color="#16a34a", label=T("cyc_legend_cum"))
-        axd.plot([tindex.iloc[0], tindex.iloc[-1]], [0, cum_cycles[-1]],
-                 color="#9ca3af", ls="--", label=T("cyc_legend_steady"))
-        axd.set_ylabel(T("cyc_axis")); axd.set_xlabel(T("axis_date"))
-        axd.set_title(T("cyc_title")); axd.legend(fontsize=7)
-        fig4.tight_layout()
-        figs["cycles"] = [(fig4, T("pdf_cap_cyc"))]
-
-    if "payback" in sections:
-        # Whole-system payback U-curve (matches the "Rentabilite" tab). Self-contained: recompute
-        # the frame so the PDF never depends on whether the tab was rendered. The money-optimum
-        # annotation uses the same dynamic reason as the dashboard (_payback_reason), so the PDF
-        # no longer ships the bare "least-bad" label.
-        pay_gs2 = grid_search(
-            df.import_kWh.values,
-            df.export_kWh.values,
-            list(range(1, int(cap_max) + 1)),
-            powers,
-            meta.dt_hours,
-            roundtrip_eff,
-            tariff_import,
-            tariff_export,
-            meta.coverage_days,
-            timestamps=df.timestamp.values,
-            tariff_import_ht=tariff_import_ht,
-            tariff_import_bt=tariff_import_bt,
-            high_tariff_periods=high_tariff_periods,
-            weekend_low_tariff=weekend_low_tariff,
-        )
-        fp = pay_gs2.loc[pay_gs2.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
-                   .sort_values("Cap_kWh").reset_index(drop=True)
-        _price_mid = (cost_price_lo + cost_price_hi) / 2
-        fp["payback_yr"] = (cost_fixed + _price_mid * fp.Cap_kWh) \
-            / fp.Gain_CHF.where(fp.Gain_CHF > 0, np.nan)
-        fig5, axp = plt.subplots(figsize=(9, 3.4))
-        axp.plot(fp.Cap_kWh, fp.payback_yr, "-o", color="#7c3aed", lw=2, ms=4)
-        axp.axhline(cost_life, color="#dc2626", ls="--", lw=1)
-        axp.text(fp.Cap_kWh.iloc[-1], cost_life, _tx(T("pay_life_line", life=cost_life)),
-                 color="#dc2626", fontsize=7, ha="right", va="bottom")
-        pb_row, pb_text = _payback_reason(fp, T, float(best.Cap_kWh), cycles_low)
-        pb_x, pb_y = float(pb_row.Cap_kWh), float(pb_row.payback_yr)
-        axp.plot([pb_x], [pb_y], "o", color="#f97316", ms=7)
-        # Box up-LEFT of the trough; green recommended label up-RIGHT of its line, so the two
-        # never overlap (same separation as the on-screen chart).
-        axp.annotate(_annot_plain(pb_text), xy=(pb_x, pb_y), xytext=(-12, 28),
-                     textcoords="offset points", fontsize=6.5, color="#9a3412",
-                     ha="right", va="bottom",
-                     bbox=dict(boxstyle="round", fc="#fff7ed", ec="#f97316", lw=0.8),
-                     arrowprops=dict(arrowstyle="->", color="#f97316"))
-        axp.axvline(best.Cap_kWh, color="#16a34a", ls=":", lw=1.5)
-        axp.text(best.Cap_kWh, axp.get_ylim()[1], _tx(T("pay_rec_line", cap=f"{best.Cap_kWh:.0f}")),
-                 color="#16a34a", fontsize=7, ha="left", va="top")
-        axp.set_xlabel(T("axis_capacity")); axp.set_ylabel(T("pay_pb_axis"))
-        axp.set_title(T("pay_pb_title")); fig5.tight_layout()
-
-        # 2nd payback lens (matches the cycles/yr chart under the on-screen Payback tab): is
-        # each kWh of capacity actually cycled? Price-free proxy for "well used".
-        fig6, axq = plt.subplots(figsize=(9, 3.0))
-        l1, = axq.plot(fp.Cap_kWh, fp.Cycles_per_year, "-o", color="#0891b2", lw=2, ms=4,
-                       label=T("pay_cycles_use"))
-        axq.axhspan(cycles_low, brand.cycles_high, color="#86efac", alpha=0.25)
-        axq.text(fp.Cap_kWh.iloc[0], (cycles_low + brand.cycles_high) / 2,
-                 _tx(T("pay_cycles_healthy", low=int(cycles_low), high=int(brand.cycles_high))),
-                 fontsize=6, color="#15803d", va="center")
-        axq.axhline(150, color="#dc2626", ls="--", lw=1)
-        axq.text(fp.Cap_kWh.iloc[-1], 150, _tx(T("pay_cycles_oversized")),
-                 fontsize=6, color="#dc2626", ha="right", va="bottom")
-        axq.axvline(best.Cap_kWh, color="#16a34a", ls=":", lw=1.5)
-        axq.text(best.Cap_kWh, axq.get_ylim()[1], _tx(T("pay_rec_line", cap=f"{best.Cap_kWh:.0f}")),
-                 color="#16a34a", fontsize=7, ha="left", va="top")
-        axq.set_xlabel(T("axis_capacity")); axq.set_ylabel(T("axis_cycles"), color="#0891b2")
-        axq2 = axq.twinx()
-        l2, = axq2.plot(fp.Cap_kWh, fp.Cycles_per_year / 365.0, ":", color="#65a30d", lw=1.5,
-                        label=T("pay_cycles_frac"))
-        axq2.set_ylabel(T("pay_cycles_y2"), color="#65a30d")
-        axq.legend([l1, l2], [l1.get_label(), l2.get_label()], fontsize=7, loc="upper right")
-        axq.set_title(T("pdf_cycles_title")); fig6.tight_layout()
-
-        figs["payback"] = [
-            (fig5, T("pay_pb_caption", pb=f"{pb_x:.0f}", rec=f"{best.Cap_kWh:.0f}")),
-            (fig6, T("pay_cycles_caption", low=int(cycles_low))),
-        ]
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16); pdf.cell(0, 10, _tx(T("pdf_title")), ln=True, align="C")
-    pdf.ln(4); pdf.set_font("Arial", "B", 12); pdf.cell(0, 8, _tx(T("pdf_section")), ln=True)
-    pdf.set_font("Arial", "", 11)
-    rows = [
-        (T("pdf_capacity"), f"{best.Cap_kWh:.0f} kWh"),
-        (T("pdf_power"), f"{best.Power_kW:.0f} kW"),
-        (T("pdf_savings"), T("pdf_savings_val", v=f"{best.Gain_CHF:,.0f}")),
-        (T("pdf_brand"), brand.name),
-        (T("pdf_cycles"), T("pdf_cycles_val", cyc=f"{best.Cycles_per_year:.0f}",
-                            low=int(brand.cycles_low), high=int(brand.cycles_high))),
-        ("Profil tarifaire", tariff_profile),
-        ("Import evite HT", f"{getattr(sim, 'import_avoided_ht', 0):,.0f} kWh x {tariff_import_ht:.2f} CHF/kWh"),
-        ("Import evite BT", f"{getattr(sim, 'import_avoided_bt', 0):,.0f} kWh x {tariff_import_bt:.2f} CHF/kWh"),
-        ("Revente perdue", f"{getattr(sim, 'export_stored', 0):,.0f} kWh x {tariff_export:.2f} CHF/kWh"),
-        (T("pdf_import_avoided"), T("pdf_energy_val", kwh=f"{sim.import_avoided:,.0f}",
-                                    pct=f"{sim.import_reduction:.0%}")),
-        (T("pdf_surplus"), T("pdf_energy_val", kwh=f"{sim.export_stored:,.0f}",
-                             pct=f"{sim.surplus_captured:.0%}")),
-        (T("pdf_compare"), T("pdf_compare_val", cap=f"{big.Cap_kWh:.0f}",
-                             gain=f"{big.Gain_CHF:,.0f}", cyc=f"{big.Cycles_per_year:.0f}")),
-        (T("pdf_source"), T("pdf_source_val", vendor=meta.vendor, days=f"{meta.coverage_days:.0f}")),
-    ]
-    for a, b in rows:
-        pdf.cell(70, 7, _tx(a)); pdf.cell(0, 7, _tx(b), ln=True)
-    pdf.set_text_color(180, 0, 0)
-    for code, params in rec.warnings:
-        pdf.set_x(pdf.l_margin)  # multi_cell can leave x at the right edge -> reset each time
-        pdf.multi_cell(0, 6, _tx("! " + msg(L, code, params)))
-    pdf.set_text_color(0, 0, 0); pdf.ln(1)
-
-    # Plain-language verdict so a buyer reading the PDF gets the reasoning, not just charts.
-    pdf.set_font("Arial", "", 10); pdf.set_x(pdf.l_margin)
-    pdf.multi_cell(0, 5, _pdf_text(T("pay_verdict", rec=f"{best.Cap_kWh:.0f}",
-                                     cyc=f"{best.Cycles_per_year:.0f}")))
-    pdf.set_font("Arial", "", 11); pdf.ln(2)
-
-    # Order matches the on-screen tabs: frontier, payback (U + cycles lens), SOC, cumulative
-    # cycles, before/after. Only the selected sections were built; each figure gets a caption
-    # below it so the report explains itself.
-    for key in ("frontier", "payback", "soc", "cycles", "ba"):
-        for fig, caption in figs.get(key, []):
-            buf = BytesIO(); fig.savefig(buf, format="png", dpi=120); buf.seek(0)
-            w_mm = 186
-            h_mm = w_mm * fig.get_size_inches()[1] / fig.get_size_inches()[0]
-            if pdf.get_y() + h_mm + 16 > pdf.h - pdf.b_margin:  # fig + caption -> new page
-                pdf.add_page()
-            pdf.image(buf, x=12, w=w_mm); pdf.ln(1)
-            if caption:
-                pdf.set_font("Arial", "I", 8); pdf.set_text_color(90, 90, 90)
-                pdf.set_x(pdf.l_margin); pdf.multi_cell(186, 4, _pdf_text(caption))
-                pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", "", 11)
-            pdf.ln(2)
-            plt.close(fig)
-    out = pdf.output()
-    return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
-
-
 st.divider()
 if not pdf_sections:
     st.caption(T("pdf_sections_empty"))
-st.download_button(T("pdf_button"), _build_pdf(pdf_sections),
-                   file_name=T("pdf_filename"), mime="application/pdf")
+
+pdf_bytes = generate_battery_report(
+    df=df,
+    meta=meta,
+    rec=rec,
+    best=best,
+    big=big,
+    sim=sim,
+    brand=brand,
+    tariff_profile=tariff_profile,
+    tariff_import_ht=tariff_import_ht,
+    tariff_import_bt=tariff_import_bt,
+    tariff_export=tariff_export,
+    gain_share=gain_share,
+    gain_max_extra=gain_max_extra,
+    cost_life=cost_life,
+    sections=pdf_sections,
+)
+
+st.download_button(
+    T("pdf_button"),
+    pdf_bytes,
+    file_name=T("pdf_filename"),
+    mime="application/pdf",
+)
