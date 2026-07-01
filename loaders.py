@@ -25,6 +25,7 @@ class Meta:
     n_rows: int
     coverage_days: float
     source: str
+    data_unit: str = "kWh"
 
 
 def _norm(text) -> str:
@@ -57,7 +58,71 @@ def _infer_dt_hours(ts: pd.Series) -> float:
     return float(diffs.median().total_seconds() / 3600.0)
 
 
-def _finalize(df: pd.DataFrame, vendor: str, source: str) -> tuple[pd.DataFrame, Meta]:
+DEFAULT_UNITS = {
+    "huawei": "kWh",
+    "groupe_e_xlsx": "kW",
+    "solaredge_csv": "Wh",
+    "groupe_e_csv": "Wh",
+    "romande_energie_csv": "kWh",
+}
+
+UNIT_OPTIONS = ("auto", "kWh", "kW", "Wh", "W")
+
+
+def _normalize_unit(unit: str | None) -> str:
+    if unit is None:
+        return "auto"
+    unit = str(unit).strip()
+    aliases = {
+        "Automatique": "auto",
+        "automatic": "auto",
+        "Auto": "auto",
+        "AUTO": "auto",
+        "KWH": "kWh",
+        "kwH": "kWh",
+        "KWh": "kWh",
+        "KW": "kW",
+        "WH": "Wh",
+    }
+    unit = aliases.get(unit, unit)
+    if unit not in UNIT_OPTIONS:
+        raise UnsupportedFormatError(
+            f"Unknown unit '{unit}'. Expected one of: auto, kWh, kW, Wh, W."
+        )
+    return unit
+
+
+def _convert_to_kwh(df: pd.DataFrame, unit: str, dt_hours: float) -> pd.DataFrame:
+    """Convert the raw import/export values to kWh.
+
+    kWh / Wh are already interval energies.
+    kW / W are average powers over the interval and must be multiplied by dt_hours.
+    """
+    df = df.copy()
+
+    if unit == "kWh":
+        factor = 1.0
+    elif unit == "Wh":
+        factor = 1.0 / 1000.0
+    elif unit == "kW":
+        factor = float(dt_hours)
+    elif unit == "W":
+        factor = float(dt_hours) / 1000.0
+    else:
+        raise UnsupportedFormatError(f"Unit conversion not supported for '{unit}'.")
+
+    df["import_kWh"] = df["import_kWh"] * factor
+    df["export_kWh"] = df["export_kWh"] * factor
+    return df
+
+
+def _finalize(
+    df: pd.DataFrame,
+    vendor: str,
+    source: str,
+    data_unit: str = "auto",
+    default_unit: str | None = None,
+) -> tuple[pd.DataFrame, Meta]:
     df = df.dropna(subset=["timestamp"]).copy()
     df = df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
 
@@ -65,6 +130,14 @@ def _finalize(df: pd.DataFrame, vendor: str, source: str) -> tuple[pd.DataFrame,
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).clip(lower=0.0)
 
     dt = _infer_dt_hours(df["timestamp"])
+
+    data_unit = _normalize_unit(data_unit)
+    effective_unit = default_unit or DEFAULT_UNITS.get(vendor, "kWh")
+    if data_unit != "auto":
+        effective_unit = data_unit
+
+    df = _convert_to_kwh(df, effective_unit, dt)
+
     span = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]) if len(df) else pd.Timedelta(0)
 
     meta = Meta(
@@ -73,6 +146,7 @@ def _finalize(df: pd.DataFrame, vendor: str, source: str) -> tuple[pd.DataFrame,
         n_rows=len(df),
         coverage_days=round(span.total_seconds() / 86400.0, 1),
         source=source,
+        data_unit=effective_unit,
     )
 
     return df[STD_COLS], meta
@@ -190,8 +264,8 @@ def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": ts,
-            "import_kWh": imp_kw * dt,
-            "export_kWh": exp_kw * dt,
+            "import_kWh": imp_kw,
+            "export_kWh": exp_kw,
         }
     )
 
@@ -211,8 +285,8 @@ def _load_solaredge_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": ts,
-            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce") / 1000.0,
-            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce") / 1000.0,
+            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce"),
+            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce"),
         }
     )
 
@@ -232,8 +306,8 @@ def _load_groupe_e_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": ts,
-            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce") / 1000.0,
-            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce") / 1000.0,
+            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce"),
+            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce"),
         }
     )
 
@@ -268,18 +342,24 @@ _LOADERS = {
 }
 
 
-def load_meter_file(path: str | Path) -> tuple[pd.DataFrame, Meta]:
+def load_meter_file(path: str | Path, data_unit: str = "auto") -> tuple[pd.DataFrame, Meta]:
     path = Path(path)
     vendor = detect_vendor(path)
     df = _LOADERS[vendor](path)
-    return _finalize(df, vendor, path.name)
+    return _finalize(
+        df,
+        vendor,
+        path.name,
+        data_unit=data_unit,
+        default_unit=DEFAULT_UNITS.get(vendor, "kWh"),
+    )
 
 
-def load_meter_files(paths) -> tuple[pd.DataFrame, Meta]:
+def load_meter_files(paths, data_unit: str = "auto") -> tuple[pd.DataFrame, Meta]:
     frames, vendors, sources = [], set(), []
 
     for p in paths:
-        df, m = load_meter_file(p)
+        df, m = load_meter_file(p, data_unit=data_unit)
         frames.append(df)
         vendors.add(m.vendor)
         sources.append(m.source)
@@ -287,4 +367,4 @@ def load_meter_files(paths) -> tuple[pd.DataFrame, Meta]:
     combined = pd.concat(frames, ignore_index=True)
     vendor = next(iter(vendors)) if len(vendors) == 1 else "mixed(" + ",".join(sorted(vendors)) + ")"
 
-    return _finalize(combined, vendor, "; ".join(sources))
+    return _finalize(combined, vendor, "; ".join(sources), data_unit="kWh", default_unit="kWh")
