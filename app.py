@@ -191,6 +191,24 @@ st.sidebar.header(T("settings_header"))
 # mais l'utilisateur ne voit plus le choix de marque ni les sources cycles.
 brand = BRANDS["goodwe"]
 
+st.sidebar.markdown("**Données**")
+unit_choice = st.sidebar.selectbox(
+    "Unité des données import/export",
+    ["Automatique", "kWh", "kW", "Wh", "W"],
+    index=0,
+    key="data_unit",
+    help=(
+        "Automatique utilise l'unité détectée selon le fichier. "
+        "Choisir kW/W si les colonnes sont des puissances moyennes par intervalle ; "
+        "choisir kWh/Wh si les colonnes sont déjà des énergies par intervalle."
+    ),
+)
+loader_unit = "auto" if unit_choice == "Automatique" else unit_choice
+st.sidebar.caption(
+    "kW/W = puissance moyenne convertie en kWh avec le pas de temps détecté. "
+    "kWh/Wh = énergie déjà mesurée par intervalle."
+)
+
 st.sidebar.markdown("**Tarifs énergie**")
 
 tariff_profiles = GRD_PROFILES
@@ -327,12 +345,12 @@ if not uploaded:
 
 # --------------------------------------------------------------------------- load
 @st.cache_data(show_spinner=False)
-def _load_one(name: str, data: bytes):
-    """Normalize a single uploaded file. Cached by (name, bytes)."""
+def _load_one(name: str, data: bytes, data_unit: str):
+    """Normalize a single uploaded file. Cached by (name, bytes, data_unit)."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / name
         p.write_bytes(data)
-        return load_meter_file(p)
+        return load_meter_file(p, data_unit=data_unit)
 
 
 def _combine(items: dict):
@@ -341,7 +359,7 @@ def _combine(items: dict):
     vendors = {m.vendor for _, m in items.values()}
     vendor = next(iter(vendors)) if len(vendors) == 1 else "mixed(" + ",".join(sorted(vendors)) + ")"
     sources = "; ".join(m.source for _, m in items.values())
-    return _finalize(pd.concat(frames, ignore_index=True), vendor, sources)
+    return _finalize(pd.concat(frames, ignore_index=True), vendor, sources, data_unit="kWh", default_unit="kWh")
 
 
 # Load each file on its own so one bad file doesn't sink the batch, and so the user can
@@ -351,7 +369,7 @@ skipped: list[tuple[str, str]] = []
 with st.spinner(T("spinner_load")):
     for f in uploaded:
         try:
-            loaded[f.name] = _load_one(f.name, f.getvalue())
+            loaded[f.name] = _load_one(f.name, f.getvalue(), loader_unit)
         except Exception as e:  # UnsupportedFormatError or any parse failure -> report per file
             skipped.append((f.name, str(e)))
 
@@ -379,6 +397,7 @@ if df.empty:
     st.stop()
 
 st.caption(T("active_dataset", name=active_label))
+st.caption(f"Unité appliquée aux données : **{getattr(meta, 'data_unit', 'kWh')}**")
 
 # --------------------------------------------------------------------------- data quality
 imp_tot, exp_tot = float(df.import_kWh.sum()), float(df.export_kWh.sum())
@@ -386,7 +405,8 @@ with st.expander(T("dq_expander"), expanded=len(loaded) > 1 or bool(skipped)):
     st.markdown(T("files_loaded_header"))
     for name, (d, m) in loaded.items():
         st.caption(T("file_ok", name=name, vendor=m.vendor, days=f"{m.coverage_days:.0f}",
-                     imp=float(d.import_kWh.sum()), exp=float(d.export_kWh.sum())))
+                     imp=float(d.import_kWh.sum()), exp=float(d.export_kWh.sum()))
+                   + f" | unité appliquée : {getattr(m, 'data_unit', 'kWh')}")
     for name, reason in skipped:
         st.caption(T("file_skipped", name=name, reason=reason))
     st.divider()
