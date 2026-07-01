@@ -177,14 +177,29 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str):
 
 def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
     f = frontier.copy()
-    fig, ax = plt.subplots(figsize=(7.2, 4.0))
-    ax.plot(f.Cap_kWh, f.Import_avoided_kWh, "-o", lw=2.2)
-    ax.axvline(float(best.Cap_kWh), color="gray", ls="--", lw=1)
-    ax.scatter([float(best.Cap_kWh)], [float(best.Import_avoided_kWh)], s=80, zorder=3)
+    fig, ax = plt.subplots(figsize=(11.0, 3.6))
+    ax.plot(
+        f.Cap_kWh,
+        f.Import_avoided_kWh,
+        "-o",
+        lw=2.6,
+        color="#1565C0",
+        markerfacecolor="#1565C0",
+        markeredgecolor="#1565C0",
+    )
+    ax.axvline(float(best.Cap_kWh), color="#6b7280", ls="--", lw=1.1)
+    ax.scatter(
+        [float(best.Cap_kWh)],
+        [float(best.Import_avoided_kWh)],
+        s=95,
+        zorder=3,
+        color="#1565C0",
+    )
     ax.set_title("Energie valorisee selon la capacite batterie", fontsize=11, weight="bold")
-    ax.set_xlabel("Capacite batterie (kWh)")
-    ax.set_ylabel("Import evite (kWh/an)")
-    ax.grid(alpha=0.25)
+    ax.set_xlabel("Capacite batterie (kWh)", fontsize=9, labelpad=8)
+    ax.set_ylabel("Import evite (kWh/an)", fontsize=9)
+    ax.grid(alpha=0.22)
+    ax.tick_params(axis="both", labelsize=8)
     ax.annotate(
         f"{best.Cap_kWh:.0f} kWh\n{best.Import_avoided_kWh:.0f} kWh/an",
         xy=(float(best.Cap_kWh), float(best.Import_avoided_kWh)),
@@ -194,9 +209,9 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
         bbox=dict(boxstyle="round", fc="#fff4ef", ec="#e94e35", alpha=0.95),
         arrowprops=dict(arrowstyle="->", color="#e94e35"),
     )
-    fig.tight_layout()
+    fig.tight_layout(pad=1.4)
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=160)
+    fig.savefig(buf, format="png", dpi=170, bbox_inches="tight", pad_inches=0.16)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -239,17 +254,36 @@ def _monthly_before_after(df, sim) -> pd.DataFrame:
 def _plot_monthly_import(df, sim) -> BytesIO:
     s = _monthly_before_after(df, sim)
 
-    fig, ax = plt.subplots(figsize=(11, 3.1))
-    ax.plot(s.index, s["Import avant"], marker="o", lw=2.0, label="Import avant batterie")
-    ax.plot(s.index, s["Import apres"], marker="o", lw=2.0, label="Import apres batterie")
-    ax.set_ylabel("kWh/mois")
-    ax.set_title("Import reseau mensuel avant / apres batterie", fontsize=11, weight="bold")
-    ax.legend(ncol=2, fontsize=8)
-    ax.grid(alpha=0.25)
-    ax.tick_params(axis="x", rotation=35, labelsize=7)
-    fig.tight_layout()
+    fig, ax = plt.subplots(figsize=(11.0, 3.0))
+    ax.plot(
+        s.index,
+        s["Import avant"],
+        marker="o",
+        lw=2.5,
+        color="#1565C0",
+        markerfacecolor="#1565C0",
+        markeredgecolor="#1565C0",
+        label="Import avant batterie",
+    )
+    ax.plot(
+        s.index,
+        s["Import apres"],
+        marker="o",
+        lw=2.5,
+        color="#FB8C00",
+        markerfacecolor="#FB8C00",
+        markeredgecolor="#FB8C00",
+        label="Import apres batterie",
+    )
+    ax.set_ylabel("kWh/mois", fontsize=9)
+    ax.set_title("Import reseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
+    ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
+    ax.grid(alpha=0.18)
+    ax.tick_params(axis="x", rotation=0, labelsize=8)
+    ax.tick_params(axis="y", labelsize=8)
+    fig.tight_layout(pad=1.4)
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -258,17 +292,36 @@ def _plot_monthly_import(df, sim) -> BytesIO:
 def _plot_monthly_export(df, sim) -> BytesIO:
     s = _monthly_before_after(df, sim)
 
-    fig, ax = plt.subplots(figsize=(11, 3.1))
-    ax.plot(s.index, s["Export avant"], marker="o", lw=2.0, label="Export avant batterie")
-    ax.plot(s.index, s["Export apres"], marker="o", lw=2.0, label="Export apres batterie")
-    ax.set_ylabel("kWh/mois")
-    ax.set_title("Export reseau mensuel avant / apres batterie", fontsize=11, weight="bold")
-    ax.legend(ncol=2, fontsize=8)
-    ax.grid(alpha=0.25)
-    ax.tick_params(axis="x", rotation=35, labelsize=7)
-    fig.tight_layout()
+    fig, ax = plt.subplots(figsize=(11.0, 3.0))
+    ax.plot(
+        s.index,
+        s["Export avant"],
+        marker="o",
+        lw=2.5,
+        color="#2E7D32",
+        markerfacecolor="#2E7D32",
+        markeredgecolor="#2E7D32",
+        label="Export avant batterie",
+    )
+    ax.plot(
+        s.index,
+        s["Export apres"],
+        marker="o",
+        lw=2.5,
+        color="#D32F2F",
+        markerfacecolor="#D32F2F",
+        markeredgecolor="#D32F2F",
+        label="Export apres batterie",
+    )
+    ax.set_ylabel("kWh/mois", fontsize=9)
+    ax.set_title("Export reseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
+    ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
+    ax.grid(alpha=0.18)
+    ax.tick_params(axis="x", rotation=0, labelsize=8)
+    ax.tick_params(axis="y", labelsize=8)
+    fig.tight_layout(pad=1.4)
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -352,9 +405,11 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     monthly_import = _plot_monthly_import(df, sim)
     monthly_export = _plot_monthly_export(df, sim)
 
-    pdf.image(gain, x=10, y=22, w=188)
-    pdf.image(monthly_import, x=10, y=104, w=188)
-    pdf.image(monthly_export, x=10, y=188, w=188)
+    # Hauteurs forcees pour eviter que le premier graphique ne masque son axe X
+    # et pour garantir trois graphiques lisibles sur une page A4.
+    pdf.image(gain, x=10, y=22, w=188, h=72)
+    pdf.image(monthly_import, x=10, y=101, w=188, h=62)
+    pdf.image(monthly_export, x=10, y=181, w=188, h=62)
 
     pdf.set_xy(10, 275)
     pdf.set_font("Arial", "", 7)
