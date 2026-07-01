@@ -1,4 +1,14 @@
-"""Multi-vendor meter-data loaders."""
+"""Multi-vendor meter-data loaders.
+
+Supported inputs:
+- Huawei Excel cumulative active energy exports
+- Groupe E Excel / CSV
+- SolarEdge CSV
+- Romande Energie CSV
+- Generic Excel / CSV with Date + Import + Export columns
+
+All returned values are normalized to interval kWh.
+"""
 
 from __future__ import annotations
 
@@ -41,6 +51,18 @@ def _find_col(cols, *tokens) -> str | None:
     return None
 
 
+def _find_any_col(cols, token_groups) -> str | None:
+    """Find first column matching any group of required tokens.
+
+    Example token_groups: [("date",), ("time",), ("horodat",)]
+    """
+    for group in token_groups:
+        found = _find_col(cols, *group)
+        if found is not None:
+            return found
+    return None
+
+
 def _parse_datetime(series: pd.Series, dayfirst: bool = True) -> pd.Series:
     """Parse timestamps robustly, including mixed CET/CEST timezone offsets."""
     return pd.to_datetime(
@@ -64,6 +86,8 @@ DEFAULT_UNITS = {
     "solaredge_csv": "Wh",
     "groupe_e_csv": "Wh",
     "romande_energie_csv": "kWh",
+    "generic_excel": "kWh",
+    "generic_csv": "kWh",
 }
 
 UNIT_OPTIONS = ("auto", "kWh", "kW", "Wh", "W")
@@ -75,14 +99,19 @@ def _normalize_unit(unit: str | None) -> str:
     unit = str(unit).strip()
     aliases = {
         "Automatique": "auto",
+        "automatique": "auto",
         "automatic": "auto",
         "Auto": "auto",
         "AUTO": "auto",
         "KWH": "kWh",
         "kwH": "kWh",
         "KWh": "kWh",
+        "kwh": "kWh",
         "KW": "kW",
+        "kw": "kW",
         "WH": "Wh",
+        "wh": "Wh",
+        "w": "W",
     }
     unit = aliases.get(unit, unit)
     if unit not in UNIT_OPTIONS:
@@ -92,10 +121,31 @@ def _normalize_unit(unit: str | None) -> str:
     return unit
 
 
+def _detect_unit_from_columns(*cols) -> str:
+    """Best-effort unit detection from column names.
+
+    If unsure, return kWh because most generic files already contain interval energy.
+    The user can still force kW / W / Wh from the sidebar.
+    """
+    blob = " | ".join(_norm(c).replace(" ", "") for c in cols if c is not None)
+
+    if "kwh" in blob:
+        return "kWh"
+    # Check Wh after kWh, otherwise kWh would also match Wh.
+    if "wh" in blob:
+        return "Wh"
+    if "kw" in blob:
+        return "kW"
+    # Avoid treating every word containing w as watts; require a clear unit marker.
+    if "(w)" in blob or "_w" in blob or "enw" in blob or blob.endswith("w"):
+        return "W"
+    return "kWh"
+
+
 def _convert_to_kwh(df: pd.DataFrame, unit: str, dt_hours: float) -> pd.DataFrame:
     """Convert the raw import/export values to kWh.
 
-    kWh / Wh are already interval energies.
+    kWh / Wh are interval energies.
     kW / W are average powers over the interval and must be multiplied by dt_hours.
     """
     df = df.copy()
@@ -152,6 +202,68 @@ def _finalize(
     return df[STD_COLS], meta
 
 
+def _generic_cols(cols) -> tuple[str | None, str | None, str | None]:
+    date_col = _find_any_col(
+        cols,
+        [
+            ("date",),
+            ("time",),
+            ("timestamp",),
+            ("horodat",),
+            ("heure",),
+            ("debut",),
+        ],
+    )
+    imp_col = _find_any_col(
+        cols,
+        [
+            ("import",),
+            ("soutirage",),
+            ("consommation",),
+            ("achat",),
+            ("prelev",),
+            ("prelevement",),
+        ],
+    )
+    exp_col = _find_any_col(
+        cols,
+        [
+            ("export",),
+            ("surplus",),
+            ("excedent",),
+            ("refoule",),
+            ("refoulee",),
+            ("revente",),
+            ("injection",),
+        ],
+    )
+    return date_col, imp_col, exp_col
+
+
+def _find_generic_excel_header_row(path: Path, max_rows: int = 25) -> int | None:
+    """Find the row containing Date + Import + Export headers in an Excel file."""
+    preview = pd.read_excel(path, header=None, nrows=max_rows)
+    for i in range(len(preview)):
+        row_values = [v for v in preview.iloc[i].tolist() if str(v).strip() and str(v) != "nan"]
+        if not row_values:
+            continue
+        date_col, imp_col, exp_col = _generic_cols(row_values)
+        if date_col and imp_col and exp_col:
+            return i
+    return None
+
+
+def _read_csv_auto(path: Path, nrows: int | None = None) -> pd.DataFrame:
+    """Read CSV with automatic separator detection."""
+    return pd.read_csv(
+        path,
+        sep=None,
+        engine="python",
+        encoding="utf-8-sig",
+        nrows=nrows,
+    )
+
+
 def detect_vendor(path: str | Path) -> str:
     path = Path(path)
     ext = path.suffix.lower()
@@ -165,6 +277,10 @@ def detect_vendor(path: str | Path) -> str:
 
         if "soutirage" in blob and "surplus" in blob:
             return "groupe_e_xlsx"
+
+        # Generic Excel fallback: Date + Import + Export columns.
+        if _find_generic_excel_header_row(path) is not None:
+            return "generic_excel"
 
         raise UnsupportedFormatError(f"Unknown Excel layout: {path.name}")
 
@@ -190,6 +306,15 @@ def detect_vendor(path: str | Path) -> str:
             raise UnsupportedFormatError(
                 f"{path.name}: consumption-only file (no export column), not a battery candidate."
             )
+
+        # Generic CSV fallback: Date + Import + Export columns, any common separator.
+        try:
+            preview = _read_csv_auto(path, nrows=5)
+            date_col, imp_col, exp_col = _generic_cols(preview.columns)
+            if date_col and imp_col and exp_col:
+                return "generic_csv"
+        except Exception:
+            pass
 
         raise UnsupportedFormatError(f"Unknown CSV layout: {path.name}")
 
@@ -256,7 +381,6 @@ def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
         raise UnsupportedFormatError(f"Groupe E columns not found in {path.name}")
 
     ts = _parse_datetime(df[date_col], dayfirst=True)
-    dt = _infer_dt_hours(ts.dropna())
 
     imp_kw = pd.to_numeric(df[imp_col], errors="coerce").fillna(0.0)
     exp_kw = pd.to_numeric(df[exp_col], errors="coerce").fillna(0.0)
@@ -333,12 +457,57 @@ def _load_romande_energie_csv(path: Path) -> pd.DataFrame:
     )
 
 
+def _load_generic_excel(path: Path) -> pd.DataFrame:
+    header_row = _find_generic_excel_header_row(path)
+    if header_row is None:
+        raise UnsupportedFormatError(f"Generic Excel columns not found in {path.name}")
+
+    df = pd.read_excel(path, header=header_row)
+    date_col, imp_col, exp_col = _generic_cols(df.columns)
+
+    if not (date_col and imp_col and exp_col):
+        raise UnsupportedFormatError(f"Generic Excel columns not found in {path.name}")
+
+    return pd.DataFrame(
+        {
+            "timestamp": _parse_datetime(df[date_col], dayfirst=True),
+            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce"),
+            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce"),
+        }
+    )
+
+
+def _load_generic_csv(path: Path) -> pd.DataFrame:
+    df = _read_csv_auto(path)
+    date_col, imp_col, exp_col = _generic_cols(df.columns)
+
+    if not (date_col and imp_col and exp_col):
+        raise UnsupportedFormatError(f"Generic CSV columns not found in {path.name}")
+
+    return pd.DataFrame(
+        {
+            "timestamp": _parse_datetime(df[date_col], dayfirst=True),
+            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce"),
+            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce"),
+        }
+    )
+
+
+def _default_unit_for_loaded_file(vendor: str, raw_df: pd.DataFrame | None = None) -> str:
+    if vendor in ("generic_excel", "generic_csv") and raw_df is not None:
+        _, imp_col, exp_col = _generic_cols(raw_df.columns)
+        return _detect_unit_from_columns(imp_col, exp_col)
+    return DEFAULT_UNITS.get(vendor, "kWh")
+
+
 _LOADERS = {
     "huawei": _load_huawei,
     "groupe_e_xlsx": _load_groupe_e_xlsx,
     "solaredge_csv": _load_solaredge_csv,
     "groupe_e_csv": _load_groupe_e_csv,
     "romande_energie_csv": _load_romande_energie_csv,
+    "generic_excel": _load_generic_excel,
+    "generic_csv": _load_generic_csv,
 }
 
 
@@ -346,12 +515,23 @@ def load_meter_file(path: str | Path, data_unit: str = "auto") -> tuple[pd.DataF
     path = Path(path)
     vendor = detect_vendor(path)
     df = _LOADERS[vendor](path)
+
+    # For generic files, detect kWh / Wh / kW / W from the original column names.
+    default_unit = DEFAULT_UNITS.get(vendor, "kWh")
+    if vendor == "generic_excel":
+        header_row = _find_generic_excel_header_row(path)
+        raw = pd.read_excel(path, header=header_row) if header_row is not None else None
+        default_unit = _default_unit_for_loaded_file(vendor, raw)
+    elif vendor == "generic_csv":
+        raw = _read_csv_auto(path, nrows=5)
+        default_unit = _default_unit_for_loaded_file(vendor, raw)
+
     return _finalize(
         df,
         vendor,
         path.name,
         data_unit=data_unit,
-        default_unit=DEFAULT_UNITS.get(vendor, "kWh"),
+        default_unit=default_unit,
     )
 
 
@@ -367,4 +547,9 @@ def load_meter_files(paths, data_unit: str = "auto") -> tuple[pd.DataFrame, Meta
     combined = pd.concat(frames, ignore_index=True)
     vendor = next(iter(vendors)) if len(vendors) == 1 else "mixed(" + ",".join(sorted(vendors)) + ")"
 
+    # Files are already converted to kWh by load_meter_file, so do not reconvert.
     return _finalize(combined, vendor, "; ".join(sources), data_unit="kWh", default_unit="kWh")
+
+
+if __name__ == "__main__":
+    print("loaders.py OK")
