@@ -64,13 +64,35 @@ def _find_any_col(cols, token_groups) -> str | None:
 
 
 def _parse_datetime(series: pd.Series, dayfirst: bool = True) -> pd.Series:
-    """Parse timestamps robustly, including mixed CET/CEST timezone offsets."""
-    return pd.to_datetime(
-        series,
+    """Parse timestamps robustly.
+
+    Important:
+    - Groupe E Excel files often use ISO-like strings: YYYY-MM-DD HH:MM.
+    - With pandas >= 2, pd.to_datetime can infer one strict format and then
+      silently coerce many valid dates to NaT when dayfirst=True.
+    - format="mixed" parses each value independently and prevents losing all
+      days > 12.
+    """
+    s = series.astype(str).str.strip()
+
+    # Remove trailing timezone labels sometimes present in Huawei exports.
+    s = s.str.replace(r"\s*(DST|CEST|CET|UTC|ST)\s*$", "", regex=True)
+
+    ts = pd.to_datetime(
+        s,
         errors="coerce",
         dayfirst=dayfirst,
-        utc=True,
-    ).dt.tz_convert(None)
+        format="mixed",
+    )
+
+    # If timestamps are timezone-aware, normalize to naive UTC.
+    try:
+        if getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_convert(None)
+    except Exception:
+        pass
+
+    return ts
 
 
 def _infer_dt_hours(ts: pd.Series) -> float:
@@ -174,7 +196,10 @@ def _finalize(
     default_unit: str | None = None,
 ) -> tuple[pd.DataFrame, Meta]:
     df = df.dropna(subset=["timestamp"]).copy()
-    df = df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+    # Do not drop duplicate timestamps: DST fallback can create repeated local times
+    # (e.g. 02:00, 02:15, 02:30, 02:45 twice). These are real intervals and must
+    # stay in the energy totals and battery simulation.
+    df = df.sort_values("timestamp").reset_index(drop=True)
 
     for c in ("import_kWh", "export_kWh"):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).clip(lower=0.0)
