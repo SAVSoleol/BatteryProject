@@ -298,7 +298,16 @@ cost_life = 13
 st.sidebar.markdown(T("search_range"))
 c1, c2 = st.sidebar.columns(2)
 cap_min = c1.number_input(T("cap_min"), 1, 100, 3, key="cap_min")
-cap_max = c2.number_input(T("cap_max"), 1, 200, 20, key="cap_max")
+cap_max = c2.number_input(T("cap_max"), 1, 200, 80, key="cap_max")
+auto_cap_max = st.sidebar.checkbox(
+    "Cap. max automatique",
+    value=True,
+    key="auto_cap_max",
+    help=(
+        "Calcule automatiquement une limite de recherche suffisante pour atteindre le plateau "
+        "de gain. La valeur Cap. max sert alors seulement de limite de sécurité."
+    ),
+)
 p_min = c1.number_input(T("p_min"), 1, 50, 3, key="p_min")
 p_max = c2.number_input(T("p_max"), 1, 100, 10, key="p_max")
 cap_step = c1.number_input(T("cap_step"), 1, 20, 1, key="cap_step")
@@ -423,8 +432,87 @@ if exp_tot <= 0:
     st.stop()
 
 # --------------------------------------------------------------------------- simulate + recommend
-caps = list(range(int(cap_min), int(cap_max) + 1, int(cap_step)))
+def _best_per_capacity_local(results: pd.DataFrame) -> pd.DataFrame:
+    idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
+    return results.loc[idx].sort_values("Cap_kWh").reset_index(drop=True)
+
+
+def _auto_capacity_max_from_curve(
+    results: pd.DataFrame,
+    cap_limit: int,
+    cap_step: int,
+    min_gain_share: float = 0.98,
+    marginal_floor_chf_per_kwh: float = 2.0,
+    window_kwh: float = 10.0,
+) -> int:
+    """Choose an automatic upper bound once the gain curve has flattened.
+
+    The returned value is a search limit, not necessarily the recommended capacity.
+    A small margin is kept after the plateau so the charts still show why adding more
+    capacity is not useful.
+    """
+    if results.empty:
+        return int(cap_limit)
+
+    f = _best_per_capacity_local(results).copy()
+    f["Gain_mono"] = f["Gain_CHF"].cummax()
+    gain_max = float(f["Gain_mono"].max())
+    if gain_max <= 0:
+        return int(max(f["Cap_kWh"].min(), 1))
+
+    for i, row in f.iterrows():
+        cap_i = float(row["Cap_kWh"])
+        gain_i = float(row["Gain_mono"])
+        if gain_i < gain_max * min_gain_share:
+            continue
+
+        future = f[f["Cap_kWh"] >= cap_i + window_kwh]
+        if future.empty:
+            continue
+        j = int(future.index[0])
+        cap_j = float(f.loc[j, "Cap_kWh"])
+        gain_j = float(f.loc[j, "Gain_mono"])
+        marginal = max(0.0, gain_j - gain_i) / max(cap_j - cap_i, 1e-9)
+
+        if marginal <= marginal_floor_chf_per_kwh:
+            margin = max(5, int(2 * cap_step))
+            return int(min(cap_limit, round(cap_i + margin)))
+
+    return int(cap_limit)
+
+
 powers = list(range(int(p_min), int(p_max) + 1, int(p_step)))
+cap_max_effective = int(cap_max)
+
+if auto_cap_max:
+    auto_limit = int(cap_max)
+    auto_caps = list(range(int(cap_min), auto_limit + 1, int(cap_step)))
+    if auto_caps and powers:
+        with st.spinner("Recherche automatique de la capacité max..."):
+            auto_results = grid_search(
+                df.import_kWh.values,
+                df.export_kWh.values,
+                auto_caps,
+                powers,
+                meta.dt_hours,
+                roundtrip_eff,
+                tariff_import,
+                tariff_export,
+                meta.coverage_days,
+                timestamps=df.timestamp.values,
+                tariff_import_ht=tariff_import_ht,
+                tariff_import_bt=tariff_import_bt,
+                high_tariff_periods=high_tariff_periods,
+                weekend_low_tariff=weekend_low_tariff,
+            )
+        cap_max_effective = _auto_capacity_max_from_curve(
+            auto_results,
+            cap_limit=auto_limit,
+            cap_step=int(cap_step),
+        )
+        st.sidebar.caption(f"Cap. max auto utilisée : {cap_max_effective} kWh")
+
+caps = list(range(int(cap_min), int(cap_max_effective) + 1, int(cap_step)))
 if not caps or not powers:
     st.error(T("empty_range"))
     st.stop()
@@ -779,7 +867,7 @@ with tab_pay:
     # Two size lenses (notebook §29): whole-system payback (money optimum) + cycles/yr
     # (price-free use proxy). The recommendation is where they agree; each corrects a
     # different misreading of a single money view.
-    pay_caps = list(range(1, int(cap_max) + 1))
+    pay_caps = list(range(1, int(cap_max_effective) + 1))
     pay_gs = grid_search(
         df.import_kWh.values,
         df.export_kWh.values,
