@@ -202,31 +202,25 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
     return buf
 
 
-def _plot_before_after(sim) -> BytesIO:
-    labels = ["Import", "Export"]
-    before = [sim.import_before, sim.export_before]
-    after = [sim.import_after_total, sim.export_after_total]
-    x = np.arange(len(labels))
-    width = 0.35
-    fig, ax = plt.subplots(figsize=(5.8, 3.5))
-    ax.bar(x - width / 2, before, width, label="Avant")
-    ax.bar(x + width / 2, after, width, label="Apres")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("kWh/an")
-    ax.set_title("Import et export avant / apres batterie", fontsize=11, weight="bold")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.25)
-    fig.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=160)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+MONTH_LABELS_FR = [
+    "Janvier",
+    "Fevrier",
+    "Mars",
+    "Avril",
+    "Mai",
+    "Juin",
+    "Juillet",
+    "Aout",
+    "Septembre",
+    "Octobre",
+    "Novembre",
+    "Decembre",
+]
 
 
-def _plot_monthly(df, sim) -> BytesIO:
-    s = pd.DataFrame(
+def _monthly_before_after(df, sim) -> pd.DataFrame:
+    """Monthly import/export table, always ordered from January to December."""
+    data = pd.DataFrame(
         {
             "Import avant": df.import_kWh.values,
             "Import apres": sim.import_after,
@@ -234,19 +228,44 @@ def _plot_monthly(df, sim) -> BytesIO:
             "Export apres": sim.export_after,
         },
         index=pd.to_datetime(df.timestamp),
-    ).resample("MS").sum()
-    months = s.index.strftime("%Y-%m")
+    )
 
-    fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(months, s["Import avant"], marker="o", lw=2.0, label="Import avant")
-    ax.plot(months, s["Import apres"], marker="o", lw=2.0, label="Import apres")
-    ax.plot(months, s["Export avant"], marker="o", lw=2.0, label="Export avant")
-    ax.plot(months, s["Export apres"], marker="o", lw=2.0, label="Export apres")
+    monthly = data.groupby(data.index.month).sum()
+    monthly = monthly.reindex(range(1, 13), fill_value=0.0)
+    monthly.index = MONTH_LABELS_FR
+    return monthly
+
+
+def _plot_monthly_import(df, sim) -> BytesIO:
+    s = _monthly_before_after(df, sim)
+
+    fig, ax = plt.subplots(figsize=(11, 3.1))
+    ax.plot(s.index, s["Import avant"], marker="o", lw=2.0, label="Import avant batterie")
+    ax.plot(s.index, s["Import apres"], marker="o", lw=2.0, label="Import apres batterie")
     ax.set_ylabel("kWh/mois")
-    ax.set_title("Evolution mensuelle avant / apres batterie", fontsize=11, weight="bold")
-    ax.legend(ncol=4, fontsize=8)
+    ax.set_title("Import reseau mensuel avant / apres batterie", fontsize=11, weight="bold")
+    ax.legend(ncol=2, fontsize=8)
     ax.grid(alpha=0.25)
-    ax.tick_params(axis="x", rotation=45, labelsize=7)
+    ax.tick_params(axis="x", rotation=35, labelsize=7)
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _plot_monthly_export(df, sim) -> BytesIO:
+    s = _monthly_before_after(df, sim)
+
+    fig, ax = plt.subplots(figsize=(11, 3.1))
+    ax.plot(s.index, s["Export avant"], marker="o", lw=2.0, label="Export avant batterie")
+    ax.plot(s.index, s["Export apres"], marker="o", lw=2.0, label="Export apres batterie")
+    ax.set_ylabel("kWh/mois")
+    ax.set_title("Export reseau mensuel avant / apres batterie", fontsize=11, weight="bold")
+    ax.legend(ncol=2, fontsize=8)
+    ax.grid(alpha=0.25)
+    ax.tick_params(axis="x", rotation=35, labelsize=7)
     fig.tight_layout()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=150)
@@ -330,17 +349,17 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     pdf.cell(0, 9, _tx("Graphiques principaux"), ln=True)
 
     gain = _plot_gain(rec.frontier, best, rec.gain_max)
-    before_after = _plot_before_after(sim)
-    monthly = _plot_monthly(df, sim)
+    monthly_import = _plot_monthly_import(df, sim)
+    monthly_export = _plot_monthly_export(df, sim)
 
-    pdf.image(gain, x=10, y=24, w=92)
-    pdf.image(before_after, x=110, y=24, w=88)
-    pdf.image(monthly, x=10, y=120, w=188)
+    pdf.image(gain, x=10, y=22, w=188)
+    pdf.image(monthly_import, x=10, y=104, w=188)
+    pdf.image(monthly_export, x=10, y=188, w=188)
 
     pdf.set_xy(10, 275)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'energie achetee au reseau qui peut etre evitee selon la capacite batterie. Les graphiques avant/apres montrent l'effet sur les flux reseau."))
+    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'energie achetee au reseau qui peut etre evitee selon la capacite batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export reseau."))
 
 
 def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
