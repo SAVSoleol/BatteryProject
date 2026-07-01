@@ -82,21 +82,73 @@ def _best_per_capacity(results: pd.DataFrame) -> pd.DataFrame:
     return results.loc[idx].sort_values("Cap_kWh").reset_index(drop=True)
 
 
+def _knee_pick(
+    frontier: pd.DataFrame,
+    gain_max: float,
+    marginal_gain_floor_chf_per_kwh: float = 5.0,
+    knee_window_kwh: float = 5.0,
+    min_gain_share: float = 0.85,
+) -> pd.Series | None:
+    """Return the first capacity where extra kWh no longer bring meaningful gain.
+
+    The old method selected the smallest option reaching X% of the best option in the
+    tested range. That made the answer depend heavily on Cap. max.
+
+    This method looks at the forward marginal gain: CHF/year added per extra kWh.
+    Once the next few kWh add less than `marginal_gain_floor_chf_per_kwh`, the curve
+    is considered to have reached its knee / diminishing-return point.
+    """
+    if frontier.empty or gain_max <= 0:
+        return None
+
+    f = frontier.sort_values("Cap_kWh").reset_index(drop=True).copy()
+    f["Gain_mono"] = f["Gain_CHF"].cummax()
+
+    for i, row in f.iterrows():
+        cap_i = float(row["Cap_kWh"])
+        gain_i = float(row["Gain_mono"])
+
+        if gain_i < gain_max * float(min_gain_share):
+            continue
+
+        target_cap = cap_i + float(knee_window_kwh)
+        future = f[f["Cap_kWh"] >= target_cap]
+        if future.empty:
+            continue
+
+        j = int(future.index[0])
+        cap_j = float(f.loc[j, "Cap_kWh"])
+        gain_j = float(f.loc[j, "Gain_mono"])
+        if cap_j <= cap_i:
+            continue
+
+        marginal = max(0.0, gain_j - gain_i) / (cap_j - cap_i)
+        if marginal <= float(marginal_gain_floor_chf_per_kwh):
+            # Return the real simulated row for this capacity, not the helper columns.
+            return frontier.loc[frontier["Cap_kWh"] == row["Cap_kWh"]].iloc[0]
+
+    return None
+
+
 def recommend(
     results: pd.DataFrame,
     gain_threshold: float = 0.90,
     cycles_low: float | None = None,
     coverage_days: float | None = None,
     brand: BrandSpec = DEFAULT_BRAND,
+    marginal_gain_floor_chf_per_kwh: float = 5.0,
+    knee_window_kwh: float = 5.0,
+    min_gain_share: float = 0.85,
 ) -> Recommendation:
-    """Pick the smallest battery that captures most of the maximum tariff gain.
+    """Pick the battery at the diminishing-return point.
 
     Selection rule:
-      1. calculate maximum net tariff gain in the tested range;
-      2. keep all options reaching `gain_threshold` of that maximum;
-      3. choose the smallest capacity, then the smallest power.
+      1. keep the best power option for each capacity;
+      2. look at the forward marginal gain, in CHF/year per additional kWh;
+      3. choose the first capacity where the next kWh add too little value.
 
-    This avoids recommending extra kWh that only add a very small amount of CHF/year.
+    This makes the recommendation much less dependent on the arbitrary Cap. max.
+    The `gain_threshold` argument is kept only as a fallback for old callers.
     """
 
     warnings: list[Msg] = []
@@ -123,16 +175,27 @@ def recommend(
         best = results.sort_values(["Cap_kWh", "Power_kW"]).iloc[0]
         warnings.append(("no_savings", {}))
     else:
-        gain_floor = gain_max * gain_threshold
-        candidates = results[results["Gain_CHF"] >= gain_floor].copy()
+        knee = _knee_pick(
+            frontier,
+            gain_max,
+            marginal_gain_floor_chf_per_kwh=marginal_gain_floor_chf_per_kwh,
+            knee_window_kwh=knee_window_kwh,
+            min_gain_share=min_gain_share,
+        )
 
-        if candidates.empty:
-            best = max_gain_pick
+        if knee is not None:
+            best = knee
         else:
-            best = candidates.sort_values(
-                ["Cap_kWh", "Power_kW", "Gain_CHF"],
-                ascending=[True, True, False],
-            ).iloc[0]
+            # Fallback: old 90% rule if the curve has not flattened inside the tested range.
+            gain_floor = gain_max * gain_threshold
+            candidates = results[results["Gain_CHF"] >= gain_floor].copy()
+            if candidates.empty:
+                best = max_gain_pick
+            else:
+                best = candidates.sort_values(
+                    ["Cap_kWh", "Power_kW", "Gain_CHF"],
+                    ascending=[True, True, False],
+                ).iloc[0]
 
     saved = float(max_gain_pick["Cap_kWh"] - best["Cap_kWh"])
     if saved > 0 and gain_max > 0:
